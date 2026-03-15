@@ -19,7 +19,7 @@ public sealed class SmsService : ISmsService
     {
         var normalizedPhone = NormalizePhoneNumber(phoneNumber);
         var otpCode = GenerateOtpCode();
-        var message = $"Кодиi тасдиқи шумо: {otpCode}";
+        var message = $"Ваш код подтверждения: {otpCode}";
 
         var result = await _osonSmsService.SendSmsAsync(phoneNumber, message);
 
@@ -35,7 +35,7 @@ public sealed class SmsService : ISmsService
             return otpCode;
         }
 
-        throw new InvalidOperationException(result.Message ?? "Хатогӣ дар равонкунии SMS");
+        throw new InvalidOperationException(result.Message ?? "Ошибка при отправке SMS");
     }
 
     public Task<bool> VerifyOtpAsync(string phoneNumber, string otpCode, CancellationToken cancellationToken = default)
@@ -61,10 +61,10 @@ public sealed class SmsService : ISmsService
 
     private static string NormalizePhoneNumber(string phoneNumber)
     {
-        // Хориҷ кардани тамоми аломатҳои ғайри рақамӣ
+        // Удаление всех нецифровых символов
         var digitsOnly = new string(phoneNumber.Where(char.IsDigit).ToArray());
 
-        // Агар бо + оғоз шавад, онро хориҷ мекунем
+        // Если начинается с +, удаляем его
         // +992901234567 → 992901234567
         return digitsOnly;
     }

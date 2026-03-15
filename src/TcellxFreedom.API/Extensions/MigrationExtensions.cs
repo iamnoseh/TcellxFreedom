@@ -19,16 +19,16 @@ public static class MigrationExtensions
             if (pendingMigrations.Any())
             {
                 await context.Database.MigrateAsync();
-                logger.LogInformation("Мигратсияҳо бомуваффақият татбиқ шуданд");
+                logger.LogInformation("Миграции успешно применены");
             }
             else
             {
-                logger.LogInformation("Базаи додаҳо аллакай навсозӣ шудааст. Мигратсияҳои интизоршаванда вуҷуд надоранд.");
+                logger.LogInformation("База данных уже обновлена. Ожидающих миграций не обнаружено.");
             }
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Хатогӣ ҳангоми татбиқи мигратсияҳо: {Message}", ex.Message);
+            logger.LogError(ex, "Ошибка при применении миграций: {Message}", ex.Message);
             throw;
         }
 

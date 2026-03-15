@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TcellxFreedom.API/TcellxFreedom.API.csproj" />
+    <Project Path="src/TcellxFreedom.Application/TcellxFreedom.Application.csproj" />
+    <Project Path="src/TcellxFreedom.Domain/TcellxFreedom.Domain.csproj" />
+    <Project Path="src/TcellxFreedom.Infrastructure/TcellxFreedom.Infrastructure.csproj" />
+  </Folder>
+</Solution>

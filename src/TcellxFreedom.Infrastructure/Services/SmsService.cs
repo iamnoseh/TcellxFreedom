@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Caching.Memory;
 using TcellxFreedom.Application.Interfaces;
 
 namespace TcellxFreedom.Infrastructure.Services;
@@ -5,15 +6,18 @@ namespace TcellxFreedom.Infrastructure.Services;
 public sealed class SmsService : ISmsService
 {
     private readonly IOsonSmsService _osonSmsService;
-    private readonly Dictionary<string, string> _otpStorage = new();
+    private readonly IMemoryCache _cache;
+    private const int OtpExpirationMinutes = 5;
 
-    public SmsService(IOsonSmsService osonSmsService)
+    public SmsService(IOsonSmsService osonSmsService, IMemoryCache cache)
     {
         _osonSmsService = osonSmsService;
+        _cache = cache;
     }
 
     public async Task<string> SendOtpAsync(string phoneNumber, CancellationToken cancellationToken = default)
     {
+        var normalizedPhone = NormalizePhoneNumber(phoneNumber);
         var otpCode = GenerateOtpCode();
         var message = $"Кодиi тасдиқи шумо: {otpCode}";
 
@@ -21,7 +25,13 @@ public sealed class SmsService : ISmsService
 
         if (result.IsSuccess)
         {
-            _otpStorage[phoneNumber] = otpCode;
+            var cacheKey = GetOtpCacheKey(normalizedPhone);
+            var cacheOptions = new MemoryCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(OtpExpirationMinutes)
+            };
+
+            _cache.Set(cacheKey, otpCode, cacheOptions);
             return otpCode;
         }
 
@@ -30,13 +40,16 @@ public sealed class SmsService : ISmsService
 
     public Task<bool> VerifyOtpAsync(string phoneNumber, string otpCode, CancellationToken cancellationToken = default)
     {
-        if (!_otpStorage.TryGetValue(phoneNumber, out var storedOtp))
+        var normalizedPhone = NormalizePhoneNumber(phoneNumber);
+        var cacheKey = GetOtpCacheKey(normalizedPhone);
+
+        if (!_cache.TryGetValue(cacheKey, out string? storedOtp))
             return Task.FromResult(false);
 
         var isValid = storedOtp == otpCode;
 
         if (isValid)
-            _otpStorage.Remove(phoneNumber);
+            _cache.Remove(cacheKey);
 
         return Task.FromResult(isValid);
     }
@@ -44,5 +57,20 @@ public sealed class SmsService : ISmsService
     private static string GenerateOtpCode()
     {
         return Random.Shared.Next(1000, 9999).ToString();
+    }
+
+    private static string NormalizePhoneNumber(string phoneNumber)
+    {
+        // Хориҷ кардани тамоми аломатҳои ғайри рақамӣ
+        var digitsOnly = new string(phoneNumber.Where(char.IsDigit).ToArray());
+
+        // Агар бо + оғоз шавад, онро хориҷ мекунем
+        // +992901234567 → 992901234567
+        return digitsOnly;
+    }
+
+    private static string GetOtpCacheKey(string phoneNumber)
+    {
+        return $"otp_{phoneNumber}";
     }
 }

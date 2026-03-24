@@ -8,6 +8,7 @@ using TcellxFreedom.Application.Features.Plan.Commands.CreatePlan;
 using TcellxFreedom.Application.Features.Plan.Commands.RescheduleTask;
 using TcellxFreedom.Application.Features.Plan.Commands.ReviewAiSuggestions;
 using TcellxFreedom.Application.Features.Plan.Commands.SkipTask;
+using TcellxFreedom.Application.Features.Plan.Commands.AddQuickTask;
 using TcellxFreedom.Application.Features.Plan.Commands.CreatePlanFromChat;
 using TcellxFreedom.Application.Features.Plan.Commands.UpdateTask;
 using TcellxFreedom.Application.Features.Plan.Queries.GetAiSuggestions;
@@ -30,11 +31,19 @@ public sealed class PlanController(IMediator mediator) : ControllerBase
         return Ok(result);
     }
 
+    [HttpPost("quick-task")]
+    public async Task<IActionResult> AddQuickTask([FromBody] AddQuickTaskRequestDto dto, CancellationToken ct)
+    {
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier)!;
+        var result = await mediator.Send(new AddQuickTaskCommand(userId, dto.Title, dto.Description, dto.ScheduledAt, dto.EstimatedMinutes), ct);
+        return Ok(result);
+    }
+
     [HttpPost("from-chat")]
     public async Task<IActionResult> CreatePlanFromChat([FromBody] CreatePlanFromChatRequestDto dto, CancellationToken ct)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier)!;
-        var result = await mediator.Send(new CreatePlanFromChatCommand(userId, dto.Text, dto.Date, dto.UserTimeZone), ct);
+        var result = await mediator.Send(new CreatePlanFromChatCommand(userId, dto.Text, dto.Date, dto.UserTimeZone, dto.EndDate), ct);
         return Ok(result);
     }
 

@@ -8,5 +8,6 @@ public sealed record CreatePlanFromChatCommand(
     string UserId,
     string Text,
     DateTime Date,
-    string UserTimeZone
+    string UserTimeZone,
+    DateTime? EndDate = null
 ) : IRequest<Response<PlanDetailDto>>;

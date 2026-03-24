@@ -4,7 +4,6 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Extensions.Options;
 using TcellxFreedom.Application.Interfaces;
 using TcellxFreedom.Domain.Interfaces;
@@ -75,25 +74,15 @@ public static class DependencyInjection
 
         // Gemini AI
         services.Configure<GeminiSettings>(configuration.GetSection(GeminiSettings.SectionName));
+        // Retry logic is handled inside GeminiService.CallGeminiAsync (application-level).
+        // Transport-level Polly retry caused 403s because StringContent streams were exhausted
+        // on retry — each attempt now creates a new HttpRequestMessage + StringContent.
         services.AddHttpClient("Gemini", (sp, client) =>
         {
             var settings = sp.GetRequiredService<IOptions<GeminiSettings>>().Value;
             client.BaseAddress = new Uri(settings.BaseUrl);
-            client.Timeout = TimeSpan.FromSeconds(120);
-        })
-        .AddStandardResilienceHandler(options =>
-        {
-            options.Retry.MaxRetryAttempts = 4;
-            options.Retry.BackoffType = Polly.DelayBackoffType.Exponential;
-            options.Retry.Delay = TimeSpan.FromSeconds(5);
-            options.Retry.UseJitter = true;
-            options.Retry.ShouldHandle = args =>
-                ValueTask.FromResult(
-                    args.Outcome.Result is { } r &&
-                    ((int)r.StatusCode == 429 || (int)r.StatusCode >= 500));
-            options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(110);
-            options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(14);
-            options.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(60);
+            // 300s covers 3 retries (15s+30s+60s delays) + up to 4 requests × ~30s each
+            client.Timeout = TimeSpan.FromSeconds(300);
         });
         services.AddScoped<IGeminiService, GeminiService>();
     }

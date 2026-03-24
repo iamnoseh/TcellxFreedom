@@ -5,44 +5,28 @@ namespace TcellxFreedom.Infrastructure.Mappers;
 
 public static class UserMapper
 {
-    public static User ToDomain(this ApplicationUser applicationUser)
-    {
-        var user = User.Create(applicationUser.PhoneNumber!);
+    public static User ToDomain(this ApplicationUser appUser) =>
+        User.Reconstitute(
+            appUser.Id,
+            appUser.PhoneNumber!,
+            appUser.FirstName,
+            appUser.LastName,
+            appUser.Balance,
+            appUser.CreatedAt,
+            appUser.UpdatedAt);
 
-        typeof(User).GetProperty(nameof(User.Id))!
-            .SetValue(user, applicationUser.Id);
-
-        if (!string.IsNullOrEmpty(applicationUser.FirstName) &&
-            !string.IsNullOrEmpty(applicationUser.LastName))
-        {
-            user.UpdateProfile(applicationUser.FirstName, applicationUser.LastName);
-        }
-
-        if (applicationUser.Balance > 0)
-        {
-            user.UpdateBalance(applicationUser.Balance);
-        }
-
-        return user;
-    }
-
-    public static ApplicationUser ToInfrastructure(this User domainUser, ApplicationUser? existing = null)
+    public static ApplicationUser ToInfrastructure(this User user, ApplicationUser? existing = null)
     {
         var appUser = existing ?? new ApplicationUser();
-
-        appUser.Id = domainUser.Id;
-        appUser.PhoneNumber = domainUser.PhoneNumber;
-        appUser.UserName = domainUser.PhoneNumber;
-        appUser.FirstName = domainUser.FirstName;
-        appUser.LastName = domainUser.LastName;
-        appUser.Balance = domainUser.Balance;
-        appUser.UpdatedAt = domainUser.UpdatedAt;
-
-        if (existing == null)
-        {
-            appUser.CreatedAt = domainUser.CreatedAt;
-        }
-
+        appUser.Id = user.Id;
+        appUser.PhoneNumber = user.PhoneNumber;
+        appUser.UserName = user.PhoneNumber;
+        appUser.FirstName = user.FirstName;
+        appUser.LastName = user.LastName;
+        appUser.Balance = user.Balance;
+        appUser.UpdatedAt = user.UpdatedAt;
+        if (existing is null)
+            appUser.CreatedAt = user.CreatedAt;
         return appUser;
     }
 }

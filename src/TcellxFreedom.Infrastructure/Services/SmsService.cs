@@ -35,7 +35,7 @@ public sealed class SmsService : ISmsService
             return otpCode;
         }
 
-        throw new InvalidOperationException(result.Message ?? "Ошибка при отправке SMS");
+        throw new InvalidOperationException(result.Message ?? "Хатогӣ дар равонкунии SMS");
     }
 
     public Task<bool> VerifyOtpAsync(string phoneNumber, string otpCode, CancellationToken cancellationToken = default)
@@ -61,11 +61,7 @@ public sealed class SmsService : ISmsService
 
     private static string NormalizePhoneNumber(string phoneNumber)
     {
-        // Удаление всех нецифровых символов
         var digitsOnly = new string(phoneNumber.Where(char.IsDigit).ToArray());
-
-        // Если начинается с +, удаляем его
-        // +992901234567 → 992901234567
         return digitsOnly;
     }
 

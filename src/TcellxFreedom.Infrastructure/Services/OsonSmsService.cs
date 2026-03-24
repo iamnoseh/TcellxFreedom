@@ -1,6 +1,7 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RestSharp;
 using TcellxFreedom.Application.Common;
@@ -14,10 +15,12 @@ public sealed class OsonSmsService : IOsonSmsService
 {
     private readonly RestClient _restClient;
     private readonly OsonSmsSettings _settings;
+    private readonly ILogger<OsonSmsService> _logger;
 
-    public OsonSmsService(IOptions<OsonSmsSettings> options)
+    public OsonSmsService(IOptions<OsonSmsSettings> options, ILogger<OsonSmsService> logger)
     {
         _settings = options.Value;
+        _logger = logger;
         _restClient = new RestClient();
     }
 
@@ -115,10 +118,17 @@ public sealed class OsonSmsService : IOsonSmsService
         {
             var error = GetErrorFromData(response.Data);
             if (error != null)
+            {
+                _logger.LogWarning("OsonSMS API хатогӣ баргардонд: {Error}", error.Message);
                 return new Response<T>(HttpStatusCode.BadRequest, error.Message);
+            }
 
             return new Response<T>(response.Data) { Message = successMessage };
         }
+
+        _logger.LogError(
+            "OsonSMS HTTP хатогӣ: StatusCode={StatusCode}, ErrorMessage={ErrorMessage}, Content={Content}",
+            (int)response.StatusCode, response.ErrorMessage, response.Content);
 
         return new Response<T>(response.StatusCode, response.ErrorMessage ?? errorMessage);
     }

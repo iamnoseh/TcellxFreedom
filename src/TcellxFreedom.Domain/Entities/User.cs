@@ -12,6 +12,22 @@ public sealed class User
 
     private User() { }
 
+    public static User Reconstitute(
+        string id, string phoneNumber, string? firstName, string? lastName,
+        decimal balance, DateTime createdAt, DateTime? updatedAt)
+    {
+        return new User
+        {
+            Id = id,
+            PhoneNumber = phoneNumber,
+            FirstName = firstName,
+            LastName = lastName,
+            Balance = balance,
+            CreatedAt = createdAt,
+            UpdatedAt = updatedAt
+        };
+    }
+
     public static User Create(string phoneNumber)
     {
         if (string.IsNullOrWhiteSpace(phoneNumber))

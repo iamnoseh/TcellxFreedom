@@ -1,12 +1,18 @@
+using Hangfire;
+using Hangfire.PostgreSql;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Http.Resilience;
+using Microsoft.Extensions.Options;
 using TcellxFreedom.Application.Interfaces;
 using TcellxFreedom.Domain.Interfaces;
+using TcellxFreedom.Infrastructure.Configuration;
 using TcellxFreedom.Infrastructure.Data;
 using TcellxFreedom.Infrastructure.Extensions;
 using TcellxFreedom.Infrastructure.Identity;
+using TcellxFreedom.Infrastructure.Jobs;
 using TcellxFreedom.Infrastructure.Repositories;
 using TcellxFreedom.Infrastructure.Services;
 
@@ -16,9 +22,23 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
+        services.AddDatabase(configuration);
+        services.AddIdentityServices();
+        services.AddRepositories();
+        services.AddApplicationServices(configuration);
+        services.AddHangfireServices(configuration);
+        services.AddOsonSms(configuration);
+        return services;
+    }
+
+    private static void AddDatabase(this IServiceCollection services, IConfiguration configuration)
+    {
         services.AddDbContext<ApplicationDbContext>(options =>
             options.UseNpgsql(configuration.GetConnectionString("DefaultConnection")));
+    }
 
+    private static void AddIdentityServices(this IServiceCollection services)
+    {
         services.AddIdentityCore<ApplicationUser>(options =>
         {
             options.Password.RequireDigit = false;
@@ -30,13 +50,66 @@ public static class DependencyInjection
         })
         .AddRoles<IdentityRole>()
         .AddEntityFrameworkStores<ApplicationDbContext>();
+    }
 
+    private static void AddRepositories(this IServiceCollection services)
+    {
         services.AddScoped<IUserRepository, UserRepository>();
+        services.AddScoped<IPlanRepository, PlanRepository>();
+        services.AddScoped<IPlanTaskRepository, PlanTaskRepository>();
+        services.AddScoped<ITaskNotificationRepository, TaskNotificationRepository>();
+        services.AddScoped<IUserTaskStatisticRepository, UserTaskStatisticRepository>();
+    }
+
+    private static void AddApplicationServices(this IServiceCollection services, IConfiguration configuration)
+    {
+        // Auth
         services.AddScoped<ISmsService, SmsService>();
+        services.AddScoped<IOtpSender>(sp => sp.GetRequiredService<ISmsService>());
+        services.AddScoped<IOtpVerifier>(sp => sp.GetRequiredService<ISmsService>());
         services.AddScoped<IJwtTokenService, JwtTokenService>();
 
-        services.AddOsonSms(configuration);
+        // Notifications
+        services.Configure<NotificationSettings>(configuration.GetSection(NotificationSettings.SectionName));
+        services.AddScoped<INotificationService, NotificationService>();
 
-        return services;
+        // Gemini AI
+        services.Configure<GeminiSettings>(configuration.GetSection(GeminiSettings.SectionName));
+        services.AddHttpClient("Gemini", (sp, client) =>
+        {
+            var settings = sp.GetRequiredService<IOptions<GeminiSettings>>().Value;
+            client.BaseAddress = new Uri(settings.BaseUrl);
+            client.Timeout = TimeSpan.FromSeconds(120);
+        })
+        .AddStandardResilienceHandler(options =>
+        {
+            options.Retry.MaxRetryAttempts = 4;
+            options.Retry.BackoffType = Polly.DelayBackoffType.Exponential;
+            options.Retry.Delay = TimeSpan.FromSeconds(5);
+            options.Retry.UseJitter = true;
+            options.Retry.ShouldHandle = args =>
+                ValueTask.FromResult(
+                    args.Outcome.Result is { } r &&
+                    ((int)r.StatusCode == 429 || (int)r.StatusCode >= 500));
+            options.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(110);
+            options.AttemptTimeout.Timeout = TimeSpan.FromSeconds(14);
+            options.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(60);
+        });
+        services.AddScoped<IGeminiService, GeminiService>();
+    }
+
+    private static void AddHangfireServices(this IServiceCollection services, IConfiguration configuration)
+    {
+        services.AddHangfire(config => config
+            .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
+            .UseSimpleAssemblyNameTypeSerializer()
+            .UseRecommendedSerializerSettings()
+            .UsePostgreSqlStorage(options =>
+                options.UseNpgsqlConnection(configuration.GetConnectionString("DefaultConnection")!)));
+        services.AddHangfireServer();
+        services.AddScoped<INotificationScheduler, NotificationSchedulerService>();
+        services.AddScoped<INotificationProcessor, NotificationProcessorJob>();
+        services.AddScoped<RecurringTaskGeneratorJob>();
+        services.AddScoped<WeeklyStatisticsCalculatorJob>();
     }
 }

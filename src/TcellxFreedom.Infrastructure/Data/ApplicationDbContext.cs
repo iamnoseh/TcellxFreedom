@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
+using TcellxFreedom.Domain.Entities;
+using TcellxFreedom.Infrastructure.Data.Configurations;
 using TcellxFreedom.Infrastructure.Identity;
 
 namespace TcellxFreedom.Infrastructure.Data;
@@ -9,6 +11,11 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser>
     public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options) : base(options)
     {
     }
+
+    public DbSet<Plan> Plans { get; set; }
+    public DbSet<PlanTask> PlanTasks { get; set; }
+    public DbSet<TaskNotification> TaskNotifications { get; set; }
+    public DbSet<UserTaskStatistic> UserTaskStatistics { get; set; }
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -32,5 +39,10 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser>
             entity.HasIndex(u => u.PhoneNumber)
                 .IsUnique();
         });
+
+        builder.ApplyConfiguration(new PlanConfiguration());
+        builder.ApplyConfiguration(new PlanTaskConfiguration());
+        builder.ApplyConfiguration(new TaskNotificationConfiguration());
+        builder.ApplyConfiguration(new UserTaskStatisticConfiguration());
     }
 }

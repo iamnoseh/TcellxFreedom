@@ -1,4 +1,5 @@
 using System.Text;
+using Hangfire;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
@@ -7,6 +8,7 @@ using TcellxFreedom.API.Extensions;
 using TcellxFreedom.API.Middleware;
 using TcellxFreedom.Application;
 using TcellxFreedom.Infrastructure;
+using TcellxFreedom.Infrastructure.Jobs;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -91,6 +93,19 @@ app.UseHttpsRedirection();
 app.UseAuthentication();
 app.UseAuthorization();
 
+app.UseHangfireDashboard("/hangfire");
+
 app.MapControllers();
+
+// Register recurring background jobs
+RecurringJob.AddOrUpdate<RecurringTaskGeneratorJob>(
+    "generate-recurring-tasks",
+    job => job.ExecuteAsync(),
+    Cron.Daily);
+
+RecurringJob.AddOrUpdate<WeeklyStatisticsCalculatorJob>(
+    "calculate-weekly-stats",
+    job => job.ExecuteAsync(),
+    "0 23 * * 0");
 
 app.Run();

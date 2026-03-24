@@ -21,4 +21,9 @@
     <ProjectReference Include="..\TcellxFreedom.Infrastructure\TcellxFreedom.Infrastructure.csproj" />
   </ItemGroup>
 
+
+  <Target Name="UnblockOutputFiles" AfterTargets="Build">
+    <Exec Command="powershell -Command &quot;Get-ChildItem -Path '$(OutputPath)' -Recurse -Include '*.dll','*.exe' | Unblock-File&quot;" ContinueOnError="true" />
+  </Target>
+
 </Project>

@@ -13,6 +13,10 @@ using TcellxFreedom.Infrastructure.Data.Seeders;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Cloud Run sets PORT env var — listen on it
+var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
+builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
@@ -52,11 +56,15 @@ builder.Services.AddSwaggerGen(options =>
 
 builder.Services.AddMemoryCache();
 
+var allowedOrigins = builder.Configuration
+    .GetSection("AllowedOrigins")
+    .Get<string[]>() ?? ["http://localhost:3000"];
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFrontend", policy =>
     {
-        policy.WithOrigins("http://localhost:3000")
+        policy.WithOrigins(allowedOrigins)
               .AllowAnyHeader()
               .AllowAnyMethod()
               .AllowCredentials();
@@ -93,11 +101,8 @@ var app = builder.Build();
 await app.ApplyMigrationsAsync();
 await app.SeedTcellPassDataAsync();
 
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+app.UseSwagger();
+app.UseSwaggerUI();
 
 app.UseMiddleware<GlobalExceptionMiddleware>();
 

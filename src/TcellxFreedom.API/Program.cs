@@ -65,16 +65,9 @@ builder.Services.AddCors(options =>
     options.AddPolicy("AllowFrontend", policy =>
     {
         policy
-            .SetIsOriginAllowed(origin =>
-            {
-                if (allowedOrigins.Contains(origin)) return true;
-                // Allow all Vercel preview deployments
-                var uri = new Uri(origin);
-                return uri.Host.EndsWith(".vercel.app");
-            })
+            .AllowAnyOrigin()
             .AllowAnyHeader()
-            .AllowAnyMethod()
-            .AllowCredentials();
+            .AllowAnyMethod();
     });
 });
 

@@ -58,7 +58,7 @@ builder.Services.AddMemoryCache();
 
 var allowedOrigins = builder.Configuration
     .GetSection("AllowedOrigins")
-    .Get<string[]>() ?? ["https://tcellx-freedom.vercel.app/"];
+    .Get<string[]>() ?? ["https://tcellx-freedom.vercel.app"];
 
 builder.Services.AddCors(options =>
 {

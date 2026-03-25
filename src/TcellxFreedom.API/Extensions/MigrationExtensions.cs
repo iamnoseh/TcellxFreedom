@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using TcellxFreedom.Infrastructure.Data;
+using TcellxFreedom.Infrastructure.Data.Seeders;
 
 namespace TcellxFreedom.API.Extensions;
 
@@ -33,5 +34,13 @@ public static class MigrationExtensions
         }
 
         return app;
+    }
+
+    public static async Task SeedTcellPassDataAsync(this IApplicationBuilder app)
+    {
+        using var scope = app.ApplicationServices.CreateScope();
+        var seeder = scope.ServiceProvider.GetRequiredService<TcellPassSeeder>();
+        await seeder.SeedTaskTemplatesAsync();
+        await seeder.SeedLevelRewardsAsync();
     }
 }

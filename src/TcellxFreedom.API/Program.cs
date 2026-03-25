@@ -9,6 +9,7 @@ using TcellxFreedom.API.Middleware;
 using TcellxFreedom.Application;
 using TcellxFreedom.Infrastructure;
 using TcellxFreedom.Infrastructure.Jobs;
+using TcellxFreedom.Infrastructure.Data.Seeders;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -90,6 +91,7 @@ builder.Services.AddInfrastructure(builder.Configuration);
 var app = builder.Build();
 
 await app.ApplyMigrationsAsync();
+await app.SeedTcellPassDataAsync();
 
 if (app.Environment.IsDevelopment())
 {
@@ -120,5 +122,15 @@ RecurringJob.AddOrUpdate<WeeklyStatisticsCalculatorJob>(
     "calculate-weekly-stats",
     job => job.ExecuteAsync(),
     "0 23 * * 0");
+
+RecurringJob.AddOrUpdate<DailyTaskAssignmentJob>(
+    "assign-daily-tasks",
+    job => job.ExecuteAsync(),
+    Cron.Daily);
+
+RecurringJob.AddOrUpdate<ExpireOldTasksJob>(
+    "expire-old-tasks",
+    job => job.ExecuteAsync(),
+    "1 0 * * *");
 
 app.Run();

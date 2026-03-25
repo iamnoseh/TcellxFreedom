@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/HP/Desktop/tcellx-frontend/lib/types/**)",
+      "Read(//c/Users/HP/Desktop/tcellx-frontend/components/home/**)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\HP\\Desktop\\tcellx-frontend\\components\\tcell-pass",
+      "C:\\Users\\HP\\Desktop\\tcellx-frontend\\app\\(main)\\tcell-pass",
+      "C:\\Users\\HP\\Desktop\\tcellx-frontend\\app\\(main)",
+      "C:\\Users\\HP\\Desktop\\tcellx-frontend\\components\\layout"
+    ]
+  }
+}

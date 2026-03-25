@@ -9,6 +9,7 @@ using TcellxFreedom.Application.Interfaces;
 using TcellxFreedom.Domain.Interfaces;
 using TcellxFreedom.Infrastructure.Configuration;
 using TcellxFreedom.Infrastructure.Data;
+using TcellxFreedom.Infrastructure.Data.Seeders;
 using TcellxFreedom.Infrastructure.Extensions;
 using TcellxFreedom.Infrastructure.Identity;
 using TcellxFreedom.Infrastructure.Jobs;
@@ -58,6 +59,11 @@ public static class DependencyInjection
         services.AddScoped<IPlanTaskRepository, PlanTaskRepository>();
         services.AddScoped<ITaskNotificationRepository, TaskNotificationRepository>();
         services.AddScoped<IUserTaskStatisticRepository, UserTaskStatisticRepository>();
+        services.AddScoped<IUserTcellPassRepository, UserTcellPassRepository>();
+        services.AddScoped<IPassTaskTemplateRepository, PassTaskTemplateRepository>();
+        services.AddScoped<IUserDailyTaskRepository, UserDailyTaskRepository>();
+        services.AddScoped<ILevelRewardRepository, LevelRewardRepository>();
+        services.AddScoped<IUserLevelRewardRepository, UserLevelRewardRepository>();
     }
 
     private static void AddApplicationServices(this IServiceCollection services, IConfiguration configuration)
@@ -74,17 +80,17 @@ public static class DependencyInjection
 
         // Gemini AI
         services.Configure<GeminiSettings>(configuration.GetSection(GeminiSettings.SectionName));
-        // Retry logic is handled inside GeminiService.CallGeminiAsync (application-level).
-        // Transport-level Polly retry caused 403s because StringContent streams were exhausted
-        // on retry — each attempt now creates a new HttpRequestMessage + StringContent.
-        services.AddHttpClient("Gemini", (sp, client) =>
+               services.AddHttpClient("Gemini", (sp, client) =>
         {
             var settings = sp.GetRequiredService<IOptions<GeminiSettings>>().Value;
             client.BaseAddress = new Uri(settings.BaseUrl);
-            // 300s covers 3 retries (15s+30s+60s delays) + up to 4 requests × ~30s each
             client.Timeout = TimeSpan.FromSeconds(300);
         });
         services.AddScoped<IGeminiService, GeminiService>();
+
+        // TcellPass
+        services.AddScoped<ITcellPassService, TcellPassService>();
+        services.AddScoped<TcellPassSeeder>();
     }
 
     private static void AddHangfireServices(this IServiceCollection services, IConfiguration configuration)
@@ -100,5 +106,7 @@ public static class DependencyInjection
         services.AddScoped<INotificationProcessor, NotificationProcessorJob>();
         services.AddScoped<RecurringTaskGeneratorJob>();
         services.AddScoped<WeeklyStatisticsCalculatorJob>();
+        services.AddScoped<DailyTaskAssignmentJob>();
+        services.AddScoped<ExpireOldTasksJob>();
     }
 }

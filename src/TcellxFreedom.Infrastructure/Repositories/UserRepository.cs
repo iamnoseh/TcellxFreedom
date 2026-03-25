@@ -48,4 +48,16 @@ public sealed class UserRepository : IUserRepository
         _context.Users.Update(updated);
         await _context.SaveChangesAsync(cancellationToken);
     }
+
+    public async Task<Dictionary<string, string>> GetDisplayNamesByIdsAsync(
+        IEnumerable<string> userIds, CancellationToken cancellationToken = default)
+    {
+        var ids = userIds.ToList();
+        return await _context.Users
+            .Where(u => ids.Contains(u.Id))
+            .ToDictionaryAsync(
+                u => u.Id,
+                u => $"{u.FirstName} {u.LastName}".Trim(),
+                cancellationToken);
+    }
 }

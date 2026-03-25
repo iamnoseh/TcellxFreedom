@@ -5,6 +5,9 @@
       "Bash(dotnet new classlib -n TcellxFreedom.Infrastructure -o src/TcellxFreedom.Infrastructure)"
     ],
     "deny": [],
-    "ask": []
+    "ask": [],
+    "additionalDirectories": [
+      "C:\\Users\\HP\\Desktop\\tcellx-frontend\\app\\(main)\\notifications"
+    ]
   }
 }

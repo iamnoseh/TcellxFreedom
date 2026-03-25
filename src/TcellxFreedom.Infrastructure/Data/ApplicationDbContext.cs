@@ -16,6 +16,11 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser>
     public DbSet<PlanTask> PlanTasks { get; set; }
     public DbSet<TaskNotification> TaskNotifications { get; set; }
     public DbSet<UserTaskStatistic> UserTaskStatistics { get; set; }
+    public DbSet<UserTcellPass> UserTcellPasses { get; set; }
+    public DbSet<PassTaskTemplate> PassTaskTemplates { get; set; }
+    public DbSet<UserDailyTask> UserDailyTasks { get; set; }
+    public DbSet<LevelReward> LevelRewards { get; set; }
+    public DbSet<UserLevelReward> UserLevelRewards { get; set; }
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -44,5 +49,10 @@ public sealed class ApplicationDbContext : IdentityDbContext<ApplicationUser>
         builder.ApplyConfiguration(new PlanTaskConfiguration());
         builder.ApplyConfiguration(new TaskNotificationConfiguration());
         builder.ApplyConfiguration(new UserTaskStatisticConfiguration());
+        builder.ApplyConfiguration(new UserTcellPassConfiguration());
+        builder.ApplyConfiguration(new PassTaskTemplateConfiguration());
+        builder.ApplyConfiguration(new UserDailyTaskConfiguration());
+        builder.ApplyConfiguration(new LevelRewardConfiguration());
+        builder.ApplyConfiguration(new UserLevelRewardConfiguration());
     }
 }

@@ -33,7 +33,7 @@ public sealed class GetStatisticsQueryHandler(
         }
         catch (JsonException ex)
         {
-            logger.LogWarning(ex, "Хатогӣ ҳангоми хондани тавсияҳои ИИ аз JSON");
+            logger.LogWarning(ex, "Ошибка при чтении предложений ИИ из JSON");
             return [];
         }
     }

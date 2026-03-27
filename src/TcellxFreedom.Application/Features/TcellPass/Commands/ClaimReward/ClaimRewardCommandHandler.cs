@@ -18,21 +18,21 @@ public sealed class ClaimRewardCommandHandler(
     {
         var pass = await passRepository.GetByUserIdAsync(request.UserId, cancellationToken);
         if (pass is null)
-            return new Response<ClaimRewardResultDto>(HttpStatusCode.NotFound, "TcellPass ёфт нашуд. Замимаро кушоед то оғоз шавад.");
+            return new Response<ClaimRewardResultDto>(HttpStatusCode.NotFound, "TcellPass не найден. Откройте приложение для начала.");
 
         // Reward for level N unlocks only after reaching level N+1 (except level 20 which unlocks at level 20)
         var requiredLevel = request.Level < 20 ? request.Level + 1 : 20;
         if (pass.CurrentLevel < requiredLevel)
-            return new Response<ClaimRewardResultDto>(HttpStatusCode.BadRequest, $"Барои гирифтани ин ҷоиза шумо бояд ба дараҷаи {requiredLevel} бирасед.");
+            return new Response<ClaimRewardResultDto>(HttpStatusCode.BadRequest, $"Для получения этой награды вам необходимо достичь уровня {requiredLevel}.");
 
         pass.CheckPremiumExpiry();
         var reward = await rewardRepository.GetByLevelAndTierAsync(request.Level, pass.Tier, cancellationToken);
         if (reward is null)
-            return new Response<ClaimRewardResultDto>(HttpStatusCode.NotFound, "Ҷоиза ёфт нашуд.");
+            return new Response<ClaimRewardResultDto>(HttpStatusCode.NotFound, "Награда не найдена.");
 
         var existing = await userRewardRepository.GetByUserAndLevelAsync(request.UserId, request.Level, pass.Tier, cancellationToken);
         if (existing is not null && existing.Status == RewardClaimStatus.Claimed)
-            return new Response<ClaimRewardResultDto>(HttpStatusCode.BadRequest, "Ин ҷоиза аллакай гирифта шудааст.");
+            return new Response<ClaimRewardResultDto>(HttpStatusCode.BadRequest, "Эта награда уже получена.");
 
         var userReward = UserLevelReward.Create(request.UserId, reward.Id, request.Level);
         userReward.MarkClaimed();
@@ -41,7 +41,7 @@ public sealed class ClaimRewardCommandHandler(
         return new Response<ClaimRewardResultDto>(new ClaimRewardResultDto(
             Level: request.Level,
             RewardDescription: reward.RewardDescription,
-            Message: $"Табрик! Ҷоизаи шумо: {reward.RewardDescription}"
+            Message: $"Поздравляем! Ваша награда: {reward.RewardDescription}"
         ));
     }
 }

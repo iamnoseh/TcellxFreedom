@@ -6,6 +6,6 @@ public sealed class CompletePassTaskCommandValidator : AbstractValidator<Complet
 {
     public CompletePassTaskCommandValidator()
     {
-        RuleFor(x => x.TaskId).NotEmpty().WithMessage("Идентификатори вазифа бояд пур бошад.");
+        RuleFor(x => x.TaskId).NotEmpty().WithMessage("Идентификатор задачи не может быть пустым.");
     }
 }

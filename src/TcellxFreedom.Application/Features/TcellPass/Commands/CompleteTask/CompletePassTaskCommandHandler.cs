@@ -19,13 +19,13 @@ public sealed class CompletePassTaskCommandHandler(
     {
         var task = await dailyTaskRepository.GetByIdWithTemplateAsync(request.TaskId, cancellationToken);
         if (task is null)
-            return new Response<CompleteTaskResultDto>(HttpStatusCode.NotFound, "Вазифа ёфт нашуд.");
+            return new Response<CompleteTaskResultDto>(HttpStatusCode.NotFound, "Задача не найдена.");
 
         if (task.UserId != request.UserId)
-            return new Response<CompleteTaskResultDto>(HttpStatusCode.Forbidden, "Дастрасӣ манъ аст.");
+            return new Response<CompleteTaskResultDto>(HttpStatusCode.Forbidden, "Доступ запрещён.");
 
         if (task.Status != DailyTaskStatus.Pending)
-            return new Response<CompleteTaskResultDto>(HttpStatusCode.BadRequest, "Ин вазифа дар ҳолати интизорӣ нест.");
+            return new Response<CompleteTaskResultDto>(HttpStatusCode.BadRequest, "Эта задача не находится в состоянии ожидания.");
 
         var pass = await passRepository.GetByUserIdAsync(request.UserId, cancellationToken);
         if (pass is null)
@@ -49,14 +49,14 @@ public sealed class CompletePassTaskCommandHandler(
 
         var today = DateOnly.FromDateTime(DateTime.UtcNow);
 
-        // Шумораи ҳамаи вазифаҳои таъиншудаи имрӯз (барои ройгон=3, барои премиум=5)
+        // Количество всех назначенных задач на сегодня (для бесплатных=3, для премиум=5)
         int totalTasksToday = await dailyTaskRepository.CountByUserAndDateAsync(request.UserId, today, cancellationToken);
         int completedCount = await dailyTaskRepository.CountCompletedByUserAndDateAsync(request.UserId, today, cancellationToken);
 
         bool streakBonusAwarded = false;
         bool streakUpdated = false;
 
-        // Стрик бонус вақте медиҳем, ки корбар ҲАМАИ вазифаҳои рӯзро иҷро кард
+        // Бонус серии даём, когда пользователь выполнил ВСЕ задачи дня
         if (totalTasksToday > 0 && completedCount >= totalTasksToday)
         {
             pass.AddXp(StreakBonusXp);

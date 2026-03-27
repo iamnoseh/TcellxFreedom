@@ -27,12 +27,12 @@ public sealed class ActivatePremiumCommandHandler(
 
         if (pass.Tier == UserTier.Premium && pass.PremiumExpiresAt.HasValue && pass.PremiumExpiresAt.Value > DateTime.UtcNow)
             return new Response<ActivatePremiumResultDto>(HttpStatusCode.BadRequest,
-                $"Шумо аллакай Премиум ҳастед. Муҳлат: {pass.PremiumExpiresAt.Value:yyyy-MM-dd}.");
+                $"Вы уже являетесь Премиум-пользователем. Срок действия: {pass.PremiumExpiresAt.Value:yyyy-MM-dd}.");
 
         var paid = await tcellPassService.ProcessPremiumPaymentAsync(request.UserId, PremiumPrice, cancellationToken);
         if (!paid)
             return new Response<ActivatePremiumResultDto>(HttpStatusCode.PaymentRequired,
-                $"Балансатон кофӣ нест. Нархи Премиум: {PremiumPrice} сомонӣ.");
+                $"Недостаточно средств на балансе. Стоимость Премиум: {PremiumPrice} сомони.");
 
         var expiresAt = DateTime.UtcNow.AddMonths(1);
         pass.ActivatePremium(expiresAt);
@@ -40,7 +40,7 @@ public sealed class ActivatePremiumCommandHandler(
 
         return new Response<ActivatePremiumResultDto>(new ActivatePremiumResultDto(
             ExpiresAt: expiresAt,
-            Message: $"Премиум фаъол шуд! То {expiresAt:yyyy-MM-dd} амал мекунад."
+            Message: $"Премиум активирован! Действует до {expiresAt:yyyy-MM-dd}."
         ));
     }
 }

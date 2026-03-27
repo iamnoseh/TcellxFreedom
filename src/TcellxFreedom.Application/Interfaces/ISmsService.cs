@@ -1,4 +1,4 @@
 namespace TcellxFreedom.Application.Interfaces;
 
-/// <summary>Интерфейси якҷоякунандаи OTP барои сабти вобастагӣ дар як ҷо</summary>
+/// <summary>Объединяющий OTP интерфейс для регистрации зависимости в одном месте</summary>
 public interface ISmsService : IOtpSender, IOtpVerifier;

@@ -13,9 +13,8 @@ using TcellxFreedom.Infrastructure.Data.Seeders;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Cloud Run sets PORT env var — listen on it
-var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
-builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+var port = Environment.GetEnvironmentVariable("PORT") ?? "3055";
+builder.WebHost.UseUrls($"http://localhost:{port}");
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -25,7 +24,7 @@ builder.Services.AddSwaggerGen(options =>
     {
         Title = "TcellxFreedom API",
         Version = "v1",
-        Description = "API барои идоракунии корбарон бо OTP authentication"
+        Description = "API для управления пользователями с OTP аутентификацией"
     });
 
     options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
@@ -35,7 +34,7 @@ builder.Services.AddSwaggerGen(options =>
         Scheme = "Bearer",
         BearerFormat = "JWT",
         In = ParameterLocation.Header,
-        Description = "JWT Authorization header. Намуна: 'Bearer {token}'"
+        Description = "JWT Authorization header. Пример: 'Bearer {token}'"
     });
 
     options.AddSecurityRequirement(new OpenApiSecurityRequirement
@@ -58,7 +57,7 @@ builder.Services.AddMemoryCache();
 
 var allowedOrigins = builder.Configuration
     .GetSection("AllowedOrigins")
-    .Get<string[]>() ?? ["https://tcellx-freedom.vercel.app"];
+    .Get<string[]>() ?? ["https://tcellx-freedom.vercel.app", "http://localhost:3000"];
 
 builder.Services.AddCors(options =>
 {

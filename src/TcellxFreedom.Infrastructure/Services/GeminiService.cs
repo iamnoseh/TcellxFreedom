@@ -62,7 +62,7 @@ public sealed class GeminiService(
                 task.Description,
                 scheduledAt,
                 EstimatedMinutes: 60,
-                Rationale: "Вазифа тибқи авлавият ва муҳлати нақша ҷадвалбандӣ шуд.",
+                Rationale: "Задача запланирована согласно приоритету и срокам плана.",
                 task.Recurrence));
         }
 
@@ -103,7 +103,13 @@ public sealed class GeminiService(
         }
     }
 
-    private static readonly int[] _retryDelaysSeconds = [15, 30, 60];
+    private static readonly int[] _retryDelaysSeconds = [30, 60, 90];
+
+    // Serialise all Gemini calls to stay within the free-tier 15 RPM limit.
+    // One request at a time + minimum 5 s gap = max 12 RPM.
+    private static readonly SemaphoreSlim _geminiGate = new(1, 1);
+    private static DateTime _lastGeminiCall = DateTime.MinValue;
+    private const int MinInterRequestMs = 5_000;
 
     private async Task<string> CallGeminiAsync(object requestBody, CancellationToken ct)
     {
@@ -112,13 +118,27 @@ public sealed class GeminiService(
         var json = JsonSerializer.Serialize(requestBody); // immutable string — safe to reuse
 
         const int maxAttempts = 4;
+        const int geminiTimeoutSeconds = 120;
         Exception? lastEx = null;
+
+        await _geminiGate.WaitAsync(CancellationToken.None);
+        try
+        {
 
         for (int attempt = 0; attempt < maxAttempts; attempt++)
         {
-            // Create a NEW HttpRequestMessage + StringContent on every attempt.
-            // HttpContent streams are exhausted after first send — this is the root cause
-            // of the previous 403s that occurred when Polly retried with the same content.
+            // Enforce minimum gap between requests to avoid 429s proactively.
+            var elapsed = (DateTime.UtcNow - _lastGeminiCall).TotalMilliseconds;
+            if (elapsed < MinInterRequestMs)
+                await Task.Delay(TimeSpan.FromMilliseconds(MinInterRequestMs - elapsed), CancellationToken.None);
+
+            // Use an independent timeout for Gemini — do NOT propagate the HTTP request's
+            // CancellationToken directly, because the ASP.NET request can be cancelled
+            // (e.g. client disconnect or short pipeline timeout) before Gemini responds.
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(geminiTimeoutSeconds));
+            using var linkedCts  = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token);
+            var geminict = linkedCts.Token;
+
             using var req = new HttpRequestMessage(HttpMethod.Post, url)
             {
                 Content = new StringContent(json, Encoding.UTF8, "application/json")
@@ -126,49 +146,77 @@ public sealed class GeminiService(
 
             try
             {
-                var response = await client.SendAsync(req, ct);
+                _lastGeminiCall = DateTime.UtcNow;
+                var response = await client.SendAsync(req, geminict);
 
                 if (response.StatusCode == HttpStatusCode.Forbidden)
                     throw new InvalidOperationException("Gemini 403: quota exhausted or invalid API key.");
 
                 if (response.StatusCode == HttpStatusCode.TooManyRequests)
                 {
+                    var errorBody = await response.Content.ReadAsStringAsync(CancellationToken.None);
+                    _logger.LogWarning("Gemini 429 body: {Body}", errorBody);
+
                     if (attempt >= maxAttempts - 1)
                         throw new InvalidOperationException("Gemini rate limit exceeded after all retry attempts.");
 
                     var delay = _retryDelaysSeconds[Math.Min(attempt, _retryDelaysSeconds.Length - 1)];
+
+                    // Prefer retryDelay from JSON body (e.g. "59s"), fallback to Retry-After header
+                    try
+                    {
+                        var bodyDoc = JsonNode.Parse(errorBody);
+                        var retryDelayStr = bodyDoc?["error"]?["details"]?.AsArray()
+                            .Select(d => d?["retryDelay"]?.GetValue<string>())
+                            .FirstOrDefault(s => s != null);
+                        if (retryDelayStr is not null
+                            && int.TryParse(retryDelayStr.TrimEnd('s'), out var bodyDelay)
+                            && bodyDelay > 0)
+                            delay = Math.Max(delay, bodyDelay);
+                    }
+                    catch { /* ignore parse errors, use default */ }
+
                     if (response.Headers.TryGetValues("Retry-After", out var vals)
-                        && int.TryParse(vals.FirstOrDefault(), out var serverDelay) && serverDelay > 0)
-                        delay = Math.Max(delay, serverDelay);
+                        && int.TryParse(vals.FirstOrDefault(), out var headerDelay) && headerDelay > 0)
+                        delay = Math.Max(delay, headerDelay);
 
                     _logger.LogWarning("Gemini 429 on attempt {Attempt}. Waiting {Delay}s before retry.", attempt, delay);
-                    await Task.Delay(TimeSpan.FromSeconds(delay), ct);
+                    await Task.Delay(TimeSpan.FromSeconds(delay), CancellationToken.None);
                     continue;
                 }
 
-                if ((int)response.StatusCode >= 500)
+                // 5xx retries are handled by the Polly resilience handler on the HttpClient.
+
+                if (!response.IsSuccessStatusCode)
                 {
-                    if (attempt >= maxAttempts - 1)
-                        throw new InvalidOperationException($"Gemini {(int)response.StatusCode} after all retry attempts.");
-                    await Task.Delay(TimeSpan.FromSeconds(_retryDelaysSeconds[Math.Min(attempt, 2)]), ct);
-                    continue;
+                    var errorBody = await response.Content.ReadAsStringAsync(CancellationToken.None);
+                    _logger.LogError("Gemini {Status} body: {Body}", (int)response.StatusCode, errorBody);
+                    response.EnsureSuccessStatusCode();
                 }
-
-                response.EnsureSuccessStatusCode();
-                var body = await response.Content.ReadAsStringAsync(ct);
+                var body = await response.Content.ReadAsStringAsync(geminict);
                 var doc = JsonNode.Parse(body);
                 var text = doc?["candidates"]?[0]?["content"]?["parts"]?[0]?["text"]?.GetValue<string>();
                 return text ?? throw new InvalidOperationException("Empty response from Gemini.");
             }
             catch (InvalidOperationException) { throw; }
-            catch (TaskCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (TaskCanceledException ex)
+            {
+                // Propagate only if the original request was cancelled (e.g. user navigated away).
+                // If it was our own Gemini timeout, treat it as a retryable failure.
+                if (ct.IsCancellationRequested) throw;
+                lastEx = ex;
+                _logger.LogWarning("Gemini timeout on attempt {Attempt}/{Max}.", attempt + 1, maxAttempts);
+            }
             catch (Exception ex) { lastEx = ex; }
 
             if (attempt < maxAttempts - 1)
-                await Task.Delay(TimeSpan.FromSeconds(_retryDelaysSeconds[Math.Min(attempt, 2)]), ct);
+                await Task.Delay(TimeSpan.FromSeconds(_retryDelaysSeconds[Math.Min(attempt, 2)]), CancellationToken.None);
         }
 
         throw new InvalidOperationException("AI service temporarily unavailable.", lastEx);
+
+        } // end semaphore try
+        finally { _geminiGate.Release(); }
     }
 
     private static object BuildSchedulePrompt(GeminiScheduleRequest request)
@@ -183,7 +231,7 @@ public sealed class GeminiService(
 
         var userMessage = JsonSerializer.Serialize(new
         {
-            instruction = "Вазифаҳои зеринро дар муддати муайяншуда чобачо кун. Барои ҳар вазифа вақти мушаххас таъин кун (дар асоси навъи вазифа ва авлавият). Муддати тахминии иҷроро бо дақиқа нишон деҳ. 2-4 вазифаи иловагии муфид пешниход кун. Унвон, тавсиф ва сабаби пешниход бояд ба забони тоҷикӣ бошанд. Ҳамаи вақтҳо дар формати UTC ISO8601 бошанд.",
+            instruction = "Расставь следующие задачи в указанный период. Назначь точное время для каждой задачи (на основе типа и приоритета). Укажи расчётное время выполнения в минутах. Предложи 2-4 дополнительные полезные задачи. Название, описание и обоснование должны быть на русском языке. Все времена должны быть в формате UTC ISO8601.",
             planRange = new
             {
                 startDate = request.StartDate.ToString("yyyy-MM-dd"),
@@ -195,11 +243,11 @@ public sealed class GeminiService(
             {
                 scheduledTasks = new[]
                 {
-                    new { title = "сатр (ба тоҷикӣ)", description = "сатр ё null (ба тоҷикӣ)", scheduledAtUtc = "ISO8601 datetime", estimatedMinutes = "адади бутун", rationale = "сатр ё null (ба тоҷикӣ)", recurrence = "None ё Daily ё Weekly" }
+                    new { title = "строка (на русском)", description = "строка или null (на русском)", scheduledAtUtc = "ISO8601 datetime", estimatedMinutes = "целое число", rationale = "строка или null (на русском)", recurrence = "None или Daily или Weekly" }
                 },
                 suggestedAdditionalTasks = new[]
                 {
-                    new { title = "сатр (ба тоҷикӣ)", description = "сатр ё null (ба тоҷикӣ)", scheduledAtUtc = "ISO8601 datetime", estimatedMinutes = "адади бутун", rationale = "сатр - ҳатмист, сабаби пешниходро ба тоҷикӣ нависед" }
+                    new { title = "строка (на русском)", description = "строка или null (на русском)", scheduledAtUtc = "ISO8601 datetime", estimatedMinutes = "целое число", rationale = "строка — обязательно, напишите причину предложения на русском языке" }
                 }
             }
         });
@@ -208,7 +256,7 @@ public sealed class GeminiService(
         {
             systemInstruction = new
             {
-                parts = new[] { new { text = "Ту мутахассиси банақшагирии шахсӣ ва менеҷменти вақт ҳастӣ. Вазифаи ту ин аст, ки вазифаҳои корбарро дар ҷадвали рӯзона ба таври оптималӣ ҷойгир кунӣ ва вазифаҳои иловагии муфид пешниход кунӣ. Ҳамаи матнҳо (title, description, rationale) бояд ба забони ТОҶИКӢ бошанд. Фақат JSON-и дуруст баргардон, ҳеҷ шарҳи берунӣ надеҳ." } }
+                parts = new[] { new { text = "Ты эксперт по личному планированию и управлению временем. Твоя задача — оптимально распределить задачи пользователя в дневном расписании и предложить дополнительные полезные задачи. Все тексты (title, description, rationale) должны быть на РУССКОМ языке. Возвращай только корректный JSON, без внешних пояснений." } }
             },
             contents = new[]
             {
@@ -230,7 +278,7 @@ public sealed class GeminiService(
 
         var userMessage = JsonSerializer.Serialize(new
         {
-            instruction = "Омори иҷрои вазифаҳои корбарро таҳлил кун ва 3-5 тавсияи мушаххас ва амалӣ барои беҳтар кардани натиҷаҳо пешниход кун. Ҷавобро ба шакли массиви JSON аз сатрҳо деҳ. Ҳамаи тавсияҳо бояд ба забони ТОҶИКӢ бошанд.",
+            instruction = "Проанализируй статистику выполнения задач пользователя и предложи 3-5 конкретных практических рекомендаций для улучшения результатов. Верни ответ в виде JSON-массива строк. Все рекомендации должны быть на РУССКОМ языке.",
             weeklyStats = JsonSerializer.Deserialize<object>(statsJson)
         });
 
@@ -278,7 +326,7 @@ public sealed class GeminiService(
             sb.AppendLine("3. Design a progressive curriculum: start with basics, build up day by day, like a real teacher would.");
             sb.AppendLine($"4. TIME ZONE: User is in UTC{utcOffsetStr}. Convert all times to UTC before writing scheduledAtUtc.");
             sb.AppendLine($"   Example: if user says '22:00' local time → subtract {utcOffsetStr} → write that as UTC in ISO8601 with Z suffix.");
-            sb.AppendLine("5. All title, description, planTitle, planDescription fields MUST be in TAJIK language.");
+            sb.AppendLine("5. All title, description, planTitle, planDescription fields MUST be in RUSSIAN language.");
             sb.AppendLine("6. suggestedAdditionalTasks MUST be an empty array [].");
             sb.AppendLine();
             sb.AppendLine("Day schedule (use these exact dates):");
@@ -288,12 +336,12 @@ public sealed class GeminiService(
                 sb.AppendLine($"  Day {d + 1}: {dayDate:yyyy-MM-dd}");
             }
             sb.AppendLine();
-            sb.AppendLine("Example of what GOOD output looks like for a Python plan (titles must be in Tajik):");
-            sb.AppendLine("  Day 1: 'Python: Насб ва муҳити кор (VSCode, Python 3)' — basic setup");
-            sb.AppendLine("  Day 2: 'Python: Тағйирёбандаҳо ва навъҳои маълумот' — variables & data types");
-            sb.AppendLine("  Day 3: 'Python: Операторҳои шартӣ (if/elif/else)' — conditionals");
-            sb.AppendLine("  Day 4: 'Python: Давраҳо (for, while)' — loops");
-            sb.AppendLine("  Day 5: 'Python: Рӯйхатҳо ва лӯлаҳо (list, tuple)' — collections");
+            sb.AppendLine("Example of what GOOD output looks like for a Python plan (titles must be in Russian):");
+            sb.AppendLine("  Day 1: 'Python: Установка и настройка рабочей среды (VSCode, Python 3)' — basic setup");
+            sb.AppendLine("  Day 2: 'Python: Переменные и типы данных' — variables & data types");
+            sb.AppendLine("  Day 3: 'Python: Условные операторы (if/elif/else)' — conditionals");
+            sb.AppendLine("  Day 4: 'Python: Циклы (for, while)' — loops");
+            sb.AppendLine("  Day 5: 'Python: Списки и кортежи (list, tuple)' — collections");
             sb.AppendLine("  ... and so on, progressively more advanced each day.");
             instruction = sb.ToString();
         }
@@ -301,9 +349,14 @@ public sealed class GeminiService(
         {
             instruction = $"You are a personal productivity coach. Extract tasks and times from the user's message. " +
                 $"TIME ZONE: User is in UTC{utcOffsetStr}. Convert all times to UTC (ISO8601 with Z). " +
-                $"All title/description/planTitle/planDescription must be in TAJIK language. " +
+                $"All title/description/planTitle/planDescription must be in RUSSIAN language. " +
                 $"Set suggestedAdditionalTasks to empty array [].";
         }
+
+        const int MaxFreeTextChars = 2000;
+        var freeText = request.FreeText?.Length > MaxFreeTextChars
+            ? request.FreeText[..MaxFreeTextChars]
+            : request.FreeText;
 
         var userMessage = JsonSerializer.Serialize(new
         {
@@ -313,14 +366,14 @@ public sealed class GeminiService(
             totalDays,
             userTimeZone = request.UserTimeZone,
             utcOffset = utcOffsetStr,
-            userText = request.FreeText,
+            userText = freeText,
             responseSchema = new
             {
-                planTitle = "string (Tajik)",
-                planDescription = "string (Tajik)",
+                planTitle = "string (Russian)",
+                planDescription = "string (Russian)",
                 scheduledTasks = new[]
                 {
-                    new { title = "string (Tajik, unique per day)", description = "string (Tajik) or null", scheduledAtUtc = "2026-03-24T17:00:00Z", estimatedMinutes = 90, rationale = "string (Tajik) or null", recurrence = "None" }
+                    new { title = "string (Russian, unique per day)", description = "string (Russian) or null", scheduledAtUtc = "2026-03-24T17:00:00Z", estimatedMinutes = 90, rationale = "string (Russian) or null", recurrence = "None" }
                 },
                 suggestedAdditionalTasks = Array.Empty<object>()
             }
@@ -330,7 +383,7 @@ public sealed class GeminiService(
         {
             systemInstruction = new
             {
-                parts = new[] { new { text = "You are an expert curriculum designer and personal coach. When building multi-day plans, you MUST produce one unique, progressively harder task per day — like a real teacher designing a course. Task titles and descriptions must be in TAJIK language. Return ONLY valid JSON, no extra text." } }
+                parts = new[] { new { text = "You are an expert curriculum designer and personal coach. When building multi-day plans, you MUST produce one unique, progressively harder task per day — like a real teacher designing a course. Task titles and descriptions must be in RUSSIAN language. Return ONLY valid JSON, no extra text." } }
             },
             contents = new[]
             {
@@ -345,7 +398,7 @@ public sealed class GeminiService(
         try
         {
             var doc = JsonNode.Parse(json);
-            var planTitle = doc?["planTitle"]?.GetValue<string>() ?? "Нақшаи рӯзона";
+            var planTitle = doc?["planTitle"]?.GetValue<string>() ?? "Ежедневный план";
             var planDescription = doc?["planDescription"]?.GetValue<string>();
 
             var scheduledTasks = new List<GeminiScheduledTask>();
@@ -391,7 +444,7 @@ public sealed class GeminiService(
         }
         catch
         {
-            return new GeminiChatScheduleResult("Нақшаи рӯзона", null, [], []);
+            return new GeminiChatScheduleResult("Ежедневный план", null, [], []);
         }
     }
 
@@ -401,7 +454,7 @@ public sealed class GeminiService(
             return BuildMultiDayCurriculumFallback(request);
 
         var tasks = ParseTasksFromText(request.FreeText, request.Date, request.UserTimeZone);
-        return new GeminiChatScheduleResult("Нақшаи рӯзона", "Нақша тибқи матни корбар тартиб дода шуд.", tasks, []);
+        return new GeminiChatScheduleResult("Ежедневный план", "План составлен на основе текста пользователя.", tasks, []);
     }
 
     // ─── Smart multi-day fallback ─────────────────────────────────────────────
@@ -422,11 +475,11 @@ public sealed class GeminiService(
             var scheduledAt = ToUtcFromLocal(date, startH, startM, request.UserTimeZone);
             var title = day < curriculum.Count
                 ? curriculum[day]
-                : $"{topicLabel}: Дарси {day + 1}";
+                : $"{topicLabel}: Урок {day + 1}";
 
             tasks.Add(new GeminiScheduledTask(
                 title,
-                $"Рӯзи {day + 1} аз {totalDays}: {title}",
+                $"День {day + 1} из {totalDays}: {title}",
                 scheduledAt,
                 durationMins,
                 null,
@@ -434,8 +487,8 @@ public sealed class GeminiService(
         }
 
         return new GeminiChatScheduleResult(
-            $"Курси {topicLabel} ({totalDays} рӯз)",
-            $"{totalDays}-рӯза нақшаи омӯзиши {topicLabel}",
+            $"Курс {topicLabel} ({totalDays} дней)",
+            $"{totalDays}-дневный план обучения {topicLabel}",
             tasks,
             []);
     }
@@ -466,28 +519,27 @@ public sealed class GeminiService(
         if (t.Contains("flutter") || t.Contains("dart"))              return ("flutter",     "Flutter/Dart");
         if (t.Contains("react"))                                       return ("react",       "React");
         if (t.Contains("sql"))                                         return ("sql",         "SQL");
-        if (t.Contains("arabic") || t.Contains("арабӣ"))              return ("arabic",      "Забони арабӣ");
+        if (t.Contains("arabic") || t.Contains("арабский"))              return ("arabic",      "Арабский язык");
         if (t.Contains("english") || t.Contains("англис") ||
-            t.Contains("инглис") || t.Contains("английск"))           return ("english",     "Забони англисӣ");
+            t.Contains("инглис") || t.Contains("английск"))           return ("english",     "Английский язык");
         if (t.Contains("бизнес") || t.Contains("business") ||
-            t.Contains("стартап") || t.Contains("startup") ||
-            t.Contains("тиҷорат") || t.Contains("тичорат"))           return ("business",    "Бизнес");
-        if (t.Contains("имтиҳон") || t.Contains("имтихон") ||
-            t.Contains("exam") || t.Contains("омода") ||
-            t.Contains("тест") || t.Contains("test"))                 return ("exam",        "Омодагӣ ба имтиҳон");
+            t.Contains("стартап") || t.Contains("startup"))           return ("business",    "Бизнес");
+        if (t.Contains("экзамен") || t.Contains("exam") ||
+            t.Contains("тест") || t.Contains("test") ||
+            t.Contains("подготов"))                                    return ("exam",        "Подготовка к экзамену");
         // Fitness: weight loss, exercise, nutrition keywords
         if (t.Contains("варзиш") || t.Contains("sport") || t.Contains("фитнес") ||
             t.Contains("машк") || t.Contains("вазн") || t.Contains("хурок") ||
             t.Contains("диет") || t.Contains("калори") || t.Contains("мушак") ||
             t.Contains("кг") || t.Contains("фарбех") || t.Contains("давид"))
-                                                                       return ("fitness",     "Варзиш ва тағзия");
+                                                                       return ("fitness",     "Спорт и питание");
         if (t.Contains("математик") || t.Contains("math"))            return ("math",        "Математика");
         // Generic fallback
         var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries)
             .Select(w => w.Trim('.', ',', '!', '?', ':'))
             .Where(w => w.Length > 4)
             .ToList();
-        var label = words.Count > 0 ? words[0] : "Омӯзиш";
+        var label = words.Count > 0 ? words[0] : "Обучение";
         return ("generic", label);
     }
 
@@ -495,259 +547,259 @@ public sealed class GeminiService(
     {
         "python" =>
         [
-            "Python: Насб ва танзими муҳити кор (Python + VSCode)",
-            "Python: Тағйирёбандаҳо ва навъҳои маълумот (int, str, float, bool)",
-            "Python: Операторҳои риёзӣ ва муқоисавӣ",
-            "Python: Сатрҳо (str) ва амалиётҳои онҳо",
-            "Python: Шарти if / elif / else",
-            "Python: Давраи for ва range()",
-            "Python: Давраи while, break ва continue",
-            "Python: Функсияҳо — def ва return",
-            "Python: Аргументҳои функсия (*args, **kwargs)",
-            "Python: Рӯйхатҳо (list) ва амалиётҳои онҳо",
-            "Python: Лӯлаҳо (tuple) ва маҷмӯаҳо (set)",
-            "Python: Луғатҳо (dict) — калид ва қимат",
-            "Python: List comprehension ва dict comprehension",
-            "Python: Коркарди файлҳо (open, read, write)",
-            "Python: Истисноҳо — try / except / finally",
-            "Python: Модулҳо ва import (os, sys, math)",
-            "Python: Барномасозии объектӣ — class ва object",
-            "Python: Ворисхӯрӣ (inheritance) ва __init__",
-            "Python: Декораторҳо ва @property",
-            "Python: Генераторҳо (generators) ва yield",
+            "Python: Установка и настройка рабочей среды (Python + VSCode)",
+            "Python: Переменные и типы данных (int, str, float, bool)",
+            "Python: Арифметические и сравнительные операторы",
+            "Python: Строки (str) и операции с ними",
+            "Python: Условие if / elif / else",
+            "Python: Цикл for и range()",
+            "Python: Цикл while, break и continue",
+            "Python: Функции — def и return",
+            "Python: Аргументы функции (*args, **kwargs)",
+            "Python: Списки (list) и операции с ними",
+            "Python: Кортежи (tuple) и множества (set)",
+            "Python: Словари (dict) — ключ и значение",
+            "Python: List comprehension и dict comprehension",
+            "Python: Работа с файлами (open, read, write)",
+            "Python: Исключения — try / except / finally",
+            "Python: Модули и import (os, sys, math)",
+            "Python: Объектно-ориентированное программирование — class и object",
+            "Python: Наследование (inheritance) и __init__",
+            "Python: Декораторы и @property",
+            "Python: Генераторы (generators) и yield",
             "Python: Регулярные выражения (re)",
-            "Python: Кор бо санаю вақт (datetime, timedelta)",
-            "Python: JSON ва CSV — хондан ва навиштан",
-            "Python: Санҷишҳо — pytest ва unittest",
-            "Python: NumPy — асосҳои ҳисоббарории рақамӣ",
-            "Python: Pandas — таҳлили маълумотҳо",
-            "Python: Matplotlib — нақшаҳои визуалӣ",
-            "Python: Requests — кор бо API-ҳои берунӣ",
-            "Python: Flask — сохтани API-и оддии веб",
-            "Python: Лоиҳаи ниҳоӣ — татбиқи ҳамаи донишҳо",
+            "Python: Работа с датой и временем (datetime, timedelta)",
+            "Python: JSON и CSV — чтение и запись",
+            "Python: Тесты — pytest и unittest",
+            "Python: NumPy — основы числовых вычислений",
+            "Python: Pandas — анализ данных",
+            "Python: Matplotlib — визуальные графики",
+            "Python: Requests — работа с внешними API",
+            "Python: Flask — создание простого веб-API",
+            "Python: Итоговый проект — применение всех знаний",
         ],
         "javascript" =>
         [
-            "JS: Асосҳо — let, const, var ва навъҳо",
-            "JS: Операторҳо ва сатрҳо (template literals)",
-            "JS: Шартҳо (if/else) ва switch",
-            "JS: Давраҳо — for, while, forEach",
-            "JS: Функсияҳо ва arrow functions",
-            "JS: Масивҳо (Array) ва амалиётҳо",
-            "JS: Объектҳо (Object) ва деструктуратсия",
+            "JS: Основы — let, const, var и типы",
+            "JS: Операторы и строки (template literals)",
+            "JS: Условия (if/else) и switch",
+            "JS: Циклы — for, while, forEach",
+            "JS: Функции и стрелочные функции",
+            "JS: Массивы (Array) и операции",
+            "JS: Объекты (Object) и деструктуризация",
             "JS: Map, Filter, Reduce",
-            "JS: DOM — дастрасӣ ва тағйир додан",
-            "JS: Рӯйдодҳо (Events) ва addEventListener",
-            "JS: Promise ва async/await",
-            "JS: Fetch API — кор бо серверҳо",
+            "JS: DOM — доступ и изменение",
+            "JS: События (Events) и addEventListener",
+            "JS: Promise и async/await",
+            "JS: Fetch API — работа с серверами",
             "JS: ES6+ — spread, rest, optional chaining",
-            "JS: Модулҳо — import/export",
-            "JS: Синфҳо (Class) ва OOP",
-            "JS: localStorage ва sessionStorage",
-            "JS: Error handling — try/catch",
+            "JS: Модули — import/export",
+            "JS: Классы (Class) и OOP",
+            "JS: localStorage и sessionStorage",
+            "JS: Обработка ошибок — try/catch",
             "JS: Regular Expressions",
-            "JS: Closure ва scope",
-            "JS: Prototype ва prototype chain",
-            "JS: TypeScript — асосҳо",
-            "JS: NPM ва package.json",
-            "JS: Node.js — сервери оддӣ",
-            "JS: Express.js — API сохтан",
-            "JS: React — асосҳои JSX ва компонентҳо",
-            "JS: React — useState ва useEffect",
-            "JS: React — props ва children",
+            "JS: Замыкания и область видимости",
+            "JS: Prototype и цепочка прототипов",
+            "JS: TypeScript — основы",
+            "JS: NPM и package.json",
+            "JS: Node.js — простой сервер",
+            "JS: Express.js — создание API",
+            "JS: React — основы JSX и компонентов",
+            "JS: React — useState и useEffect",
+            "JS: React — props и children",
             "JS: React — React Router",
-            "JS: Тест навиштан — Jest",
-            "JS: Лоиҳаи ниҳоӣ — Full-stack mini app",
+            "JS: Написание тестов — Jest",
+            "JS: Итоговый проект — Full-stack mini app",
         ],
         "fitness" =>
         [
-            "Ҳафта 1, Рӯзи 1 — Машқ: Гармкунӣ + 30 дақиқа давидани оҳиста",
-            "Ҳафта 1, Рӯзи 1 — Хурок: Субҳона овсянка + об, нисфирӯзӣ мурғ + сабзавот, шом моҳӣ + салат",
-            "Ҳафта 1, Рӯзи 2 — Машқ: Push-up 3×15, Plank 3×30сон, Squat 3×20",
-            "Ҳафта 1, Рӯзи 2 — Хурок: Калориҳо 1600-1800 ккал, протеин зиёд, қанд кам",
-            "Ҳафта 1, Рӯзи 3 — Машқ: Кардио 40 дақиқа (давидан ё велосипед)",
-            "Ҳафта 1, Рӯзи 3 — Хурок: Субҳона тухм + нон тира, нисфирӯзӣ гушт + биринҷ қаҳваранг",
-            "Ҳафта 1, Рӯзи 4 — Машқ: Истироҳат + Yoga барои чандирӣ (15 дақиқа)",
-            "Ҳафта 2, Рӯзи 1 — Машқ: HIIT 20 дақиқа — Burpee, Mountain climber, Jump squat",
-            "Ҳафта 2, Рӯзи 1 — Хурок: Оби зиёд (2-2.5л/рӯз), мева ба ҷои ширинӣ",
-            "Ҳафта 2, Рӯзи 2 — Машқ: Мушакҳои сина ва китф — Dumbbell press, Lateral raise",
-            "Ҳафта 2, Рӯзи 2 — Хурок: Субҳона чой сабз + тухм, шом каш нашавӣ баъд аз 20:00",
-            "Ҳафта 2, Рӯзи 3 — Машқ: Пиллаҳои пой — Lunges 3×15, Deadlift бо вазни бадан",
-            "Ҳафта 2, Рӯзи 3 — Хурок: Протеин 1.5г/кг вазн — мурғ, лӯбиё, тухм, моҳӣ",
-            "Ҳафта 2, Рӯзи 4 — Машқ: Пушт ва core — Plank variations, Superman, Bird-dog",
-            "Ҳафта 3, Рӯзи 1 — Машқ: Кардио шадид 45 дақиқа + гармкунӣ/совутиш",
-            "Ҳафта 3, Рӯзи 1 — Хурок: Гандум, Салат Греция, Коктейли протеин баъд аз машқ",
-            "Ҳафта 3, Рӯзи 2 — Машқ: Тамоми бадан — Full Body Workout 3 давра × 10 машқ",
-            "Ҳафта 3, Рӯзи 2 — Хурок: Ёддошти хурок — журнали хурок барои назорат",
-            "Ҳафта 3, Рӯзи 3 — Машқ: Давидан 5 км + stretch баъд аз давидан",
-            "Ҳафта 3, Рӯзи 3 — Хурок: Хуроки шаб — сабзавоти буғкарда + зардолу/себ",
-            "Ҳафта 3, Рӯзи 4 — Машқ: Core intensive — Abs circuit 4 давра",
-            "Ҳафта 4, Рӯзи 1 — Машқ: HIIT пешрафта 30 дақиқа — табата формат",
-            "Ҳафта 4, Рӯзи 1 — Хурок: Калория кам кардан то 1500 ккал (ниҳоии моҳ)",
-            "Ҳафта 4, Рӯзи 2 — Машқ: Мушакҳои тамоми бадан бо вазн (агар имкон бошад)",
-            "Ҳафта 4, Рӯзи 2 — Хурок: Обгармшавӣ субҳ — об бо лимон, сипас субҳона",
-            "Ҳафта 4, Рӯзи 3 — Машқ: Давидан 6 км — суръат назар ба ҳафтаи 1 зиёдтар",
-            "Ҳафта 4, Рӯзи 3 — Хурок: Витаминҳо ва маъданҳо — магний, рӯҳ, витамини D",
-            "Ҳафта 4, Рӯзи 4 — Машқ: Йога ва медитатсия — барқарорсозии комил",
-            "Рӯзи ниҳоӣ — Машқ: Санҷиши физикӣ — вазн, кадд, нишондиҳандаҳо",
-            "Рӯзи ниҳоӣ — Натиҷа: Таҳлили пешрафт + нақшаи моҳи оянда",
+            "Неделя 1, День 1 — Тренировка: Разминка + 30 минут лёгкого бега",
+            "Неделя 1, День 1 — Питание: Завтрак овсянка + вода, обед курица + овощи, ужин рыба + салат",
+            "Неделя 1, День 2 — Тренировка: Push-up 3×15, Plank 3×30сек, Squat 3×20",
+            "Неделя 1, День 2 — Питание: Калории 1600-1800 ккал, больше белка, меньше сахара",
+            "Неделя 1, День 3 — Тренировка: Кардио 40 минут (бег или велосипед)",
+            "Неделя 1, День 3 — Питание: Завтрак яйца + тёмный хлеб, обед мясо + коричневый рис",
+            "Неделя 1, День 4 — Тренировка: Отдых + Йога для гибкости (15 минут)",
+            "Неделя 2, День 1 — Тренировка: HIIT 20 минут — Burpee, Mountain climber, Jump squat",
+            "Неделя 2, День 1 — Питание: Много воды (2-2.5л/день), фрукты вместо сладкого",
+            "Неделя 2, День 2 — Тренировка: Грудь и плечи — Dumbbell press, Lateral raise",
+            "Неделя 2, День 2 — Питание: Завтрак зелёный чай + яйца, ужин не есть после 20:00",
+            "Неделя 2, День 3 — Тренировка: Ноги — Lunges 3×15, Deadlift с весом тела",
+            "Неделя 2, День 3 — Питание: Белок 1.5г/кг веса — курица, бобы, яйца, рыба",
+            "Неделя 2, День 4 — Тренировка: Спина и core — Plank variations, Superman, Bird-dog",
+            "Неделя 3, День 1 — Тренировка: Интенсивное кардио 45 минут + разминка/заминка",
+            "Неделя 3, День 1 — Питание: Цельнозерновые, Греческий салат, Протеиновый коктейль после тренировки",
+            "Неделя 3, День 2 — Тренировка: Всё тело — Full Body Workout 3 круга × 10 упражнений",
+            "Неделя 3, День 2 — Питание: Дневник питания — журнал еды для контроля",
+            "Неделя 3, День 3 — Тренировка: Бег 5 км + растяжка после бега",
+            "Неделя 3, День 3 — Питание: Ужин — пароваренные овощи + абрикосы/яблоко",
+            "Неделя 3, День 4 — Тренировка: Интенсивный core — Abs circuit 4 круга",
+            "Неделя 4, День 1 — Тренировка: Продвинутый HIIT 30 минут — формат табата",
+            "Неделя 4, День 1 — Питание: Снижение калорий до 1500 ккал (финал месяца)",
+            "Неделя 4, День 2 — Тренировка: Все мышцы с весами (если возможно)",
+            "Неделя 4, День 2 — Питание: Утреннее пробуждение — вода с лимоном, затем завтрак",
+            "Неделя 4, День 3 — Тренировка: Бег 6 км — скорость выше, чем на неделе 1",
+            "Неделя 4, День 3 — Питание: Витамины и минералы — магний, цинк, витамин D",
+            "Неделя 4, День 4 — Тренировка: Йога и медитация — полное восстановление",
+            "Финальный день — Тренировка: Физический тест — вес, рост, показатели",
+            "Финальный день — Результат: Анализ прогресса + план на следующий месяц",
         ],
         "english" =>
         [
-            "Англисӣ: Алифбо ва талаффузи асосӣ (Phonics A–Z)",
-            "Англисӣ: Ададҳо, рангҳо, рӯзҳои ҳафта (Numbers, Colors, Days)",
-            "Англисӣ: Саломутия ва шиносоӣ (Greetings & Introductions)",
-            "Англисӣ: Феълҳои пурмасраф — be, have, do, go",
-            "Англисӣ: Замони ҳозира — Present Simple (I work)",
-            "Англисӣ: Present Continuous — (I am working)",
-            "Англисӣ: Замони гузашта — Past Simple (I worked)",
-            "Англисӣ: Замони оянда — Future (will / going to)",
-            "Англисӣ: Артиклҳо — a, an, the",
-            "Англисӣ: Исмҳои зиёдшаванда ва ҷамъ (Plural nouns)",
-            "Англисӣ: Сифатҳо ва муқоиса (Adjectives: big, bigger, biggest)",
-            "Англисӣ: Зарфҳо — always, never, sometimes",
-            "Англисӣ: Пешоянди ҷой (Prepositions: in, on, at, under)",
-            "Англисӣ: Сухани кӯтоҳи рӯзмарра — Small Talk",
-            "Англисӣ: Хонда гирифтан — Reading comprehension (A1)",
-            "Англисӣ: Modal verbs — can, must, should, may",
-            "Англисӣ: Шартҳо — If sentences (Conditionals 0 & 1)",
-            "Англисӣ: Саволҳои умумӣ ва посух (Question words: who, what, where)",
-            "Англисӣ: Мавзӯи оила ва касб (Family & Profession vocabulary)",
-            "Англисӣ: Мавзӯи хӯрок ва хӯрокхурӣ (Food & Restaurant)",
-            "Англисӣ: Мавзӯи сафар ва транспорт (Travel & Transport)",
-            "Англисӣ: Мавзӯи саломатӣ ва бадан (Health & Body)",
-            "Англисӣ: Иборасозӣ — Phrasal verbs (get up, look for, turn on)",
-            "Англисӣ: Навиштан — Email ва хат (Writing emails)",
-            "Англисӣ: Шунидан ва фаҳмидан (Listening: диктантҳо A2)",
-            "Англисӣ: Present Perfect — (I have done)",
-            "Англисӣ: Passive voice — (It was done)",
-            "Англисӣ: Мубоҳисаи озод — Free speaking (B1 topics)",
-            "Англисӣ: Такрори пурраи грамматика (Grammar review)",
-            "Англисӣ: Санҷиши ниҳоӣ + нақша барои B1",
+            "Английский: Алфавит и основное произношение (Phonics A–Z)",
+            "Английский: Числа, цвета, дни недели (Numbers, Colors, Days)",
+            "Английский: Приветствия и знакомство (Greetings & Introductions)",
+            "Английский: Часто используемые глаголы — be, have, do, go",
+            "Английский: Настоящее время — Present Simple (I work)",
+            "Английский: Present Continuous — (I am working)",
+            "Английский: Прошедшее время — Past Simple (I worked)",
+            "Английский: Будущее время — Future (will / going to)",
+            "Английский: Артикли — a, an, the",
+            "Английский: Существительные и множественное число (Plural nouns)",
+            "Английский: Прилагательные и сравнение (Adjectives: big, bigger, biggest)",
+            "Английский: Наречия — always, never, sometimes",
+            "Английский: Предлоги места (Prepositions: in, on, at, under)",
+            "Английский: Светская беседа — Small Talk",
+            "Английский: Чтение и понимание текста (A1)",
+            "Английский: Модальные глаголы — can, must, should, may",
+            "Английский: Условные предложения (Conditionals 0 & 1)",
+            "Английский: Вопросительные слова (who, what, where)",
+            "Английский: Тема семьи и профессии (Family & Profession vocabulary)",
+            "Английский: Тема еды и ресторана (Food & Restaurant)",
+            "Английский: Тема путешествий и транспорта (Travel & Transport)",
+            "Английский: Тема здоровья и тела (Health & Body)",
+            "Английский: Фразовые глаголы — Phrasal verbs (get up, look for, turn on)",
+            "Английский: Написание — Email и письма (Writing emails)",
+            "Английский: Аудирование и понимание (Listening: диктанты A2)",
+            "Английский: Present Perfect — (I have done)",
+            "Английский: Пассивный залог — (It was done)",
+            "Английский: Свободное говорение — Free speaking (B1 topics)",
+            "Английский: Полное повторение грамматики (Grammar review)",
+            "Английский: Итоговый тест + план для B1",
         ],
         "flutter" =>
         [
-            "Flutter: Насб ва танзими Android Studio + Flutter SDK",
-            "Dart: Тағйирёбандаҳо, навъҳо (int, String, bool, double)",
-            "Dart: Шартҳо ва давраҳо (if/else, for, while)",
-            "Dart: Функсияҳо, параметрҳо ва return",
-            "Dart: Классҳо ва объектҳо (OOP)",
-            "Flutter: Hello World — аввалин app",
-            "Flutter: Widget-ҳои асосӣ — Text, Container, Column, Row",
-            "Flutter: StatelessWidget ва StatefulWidget фарқ",
-            "Flutter: setState() ва тағйири UI",
-            "Flutter: Button-ҳо — ElevatedButton, TextButton, IconButton",
-            "Flutter: TextField ва Form — гирифтани ворид аз корбар",
-            "Flutter: ListView ва ListTile — рӯйхатҳо",
-            "Flutter: Navigator — гузаштан байни саҳифаҳо",
-            "Flutter: AppBar ва BottomNavigationBar",
-            "Flutter: Image ва Icon-ҳо",
-            "Flutter: Stack ва Positioned",
+            "Flutter: Установка и настройка Android Studio + Flutter SDK",
+            "Dart: Переменные и типы (int, String, bool, double)",
+            "Dart: Условия и циклы (if/else, for, while)",
+            "Dart: Функции, параметры и return",
+            "Dart: Классы и объекты (OOP)",
+            "Flutter: Hello World — первое приложение",
+            "Flutter: Основные виджеты — Text, Container, Column, Row",
+            "Flutter: Разница StatelessWidget и StatefulWidget",
+            "Flutter: setState() и изменение UI",
+            "Flutter: Кнопки — ElevatedButton, TextButton, IconButton",
+            "Flutter: TextField и Form — получение ввода от пользователя",
+            "Flutter: ListView и ListTile — списки",
+            "Flutter: Navigator — переход между экранами",
+            "Flutter: AppBar и BottomNavigationBar",
+            "Flutter: Изображения и иконки",
+            "Flutter: Stack и Positioned",
             "Flutter: Padding, Margin, SizedBox, Expanded",
             "Flutter: Colors, ThemeData, Dark/Light mode",
-            "Flutter: HTTP ва http package — кор бо API",
+            "Flutter: HTTP и http package — работа с API",
             "Flutter: JSON parsing — jsonDecode()",
-            "Flutter: FutureBuilder ва async/await",
-            "Flutter: Provider — state management",
-            "Flutter: SharedPreferences — маълумоти маҳаллӣ",
-            "Flutter: StreamBuilder ва Stream",
-            "Flutter: Firebase Auth — login/signup",
-            "Flutter: Cloud Firestore — маълумотгоҳи абрӣ",
+            "Flutter: FutureBuilder и async/await",
+            "Flutter: Provider — управление состоянием",
+            "Flutter: SharedPreferences — локальные данные",
+            "Flutter: StreamBuilder и Stream",
+            "Flutter: Firebase Auth — вход/регистрация",
+            "Flutter: Cloud Firestore — облачная база данных",
             "Flutter: Push Notifications — Firebase Messaging",
-            "Flutter: Animations — AnimationController, Tween",
-            "Flutter: Build & Deploy — APK барои Android",
-            "Flutter: Лоиҳаи ниҳоӣ — App-и пурра аз нол",
+            "Flutter: Анимации — AnimationController, Tween",
+            "Flutter: Build & Deploy — APK для Android",
+            "Flutter: Итоговый проект — полное приложение с нуля",
         ],
         "business" =>
         [
-            "Бизнес: Идеяи бизнес — кашф ва арзёбии мушкил",
-            "Бизнес: Таҳлили бозор — кист мизоҷи ман? (ICP)",
-            "Бизнес: Таҳлили рақибон — SWOT analysis",
-            "Бизнес: Модели бизнес — Business Model Canvas",
-            "Бизнес: Нақшаи бизнес (Business Plan) чӣ гуна навишта мешавад",
-            "Бизнес: Хароҷот ва даромад — бюджети оғозӣ",
-            "Бизнес: Маркетинг — кӣ, куҷо, чӣ вақт мефурӯшам?",
-            "Бизнес: SMM — Instagram, Telegram барои бизнес",
-            "Бизнес: Бренд ва логотип — ном ва тасвири ширкат",
-            "Бизнес: Аввалин фурӯш — чӣ гуна мизоҷи нахустро ёбем?",
-            "Бизнес: Психологияи нарх — pricing strategy",
-            "Бизнес: Тарзи муошират бо мизоҷ — скриптҳои фурӯш",
-            "Бизнес: Feedback — чӣ гуна бозгӯй мегирем?",
-            "Бизнес: Ташкили кор — Trello, Notion, Asana",
-            "Бизнес: MVP — маҳсулоти минималии корӣ чист?",
-            "Бизнес: Ҷустуҷӯи сармоягузор — маблағгузорӣ",
-            "Бизнес: Pitch deck — тақдим кардани идея ба сармоягузор",
-            "Бизнес: Ҳуқуқи бизнес — қайди ширкат, андоз",
-            "Бизнес: Идоракунии кормандон — чӣ гуна ба кор мегирем?",
-            "Бизнес: KPI ва OKR — санҷиши натиҷаҳо",
-            "Бизнес: E-commerce — фурӯши онлайн",
-            "Бизнес: Логистика ва таъминот",
-            "Бизнес: Хизматрасонӣ баъд аз фурӯш (after-sales)",
-            "Бизнес: Масъалаҳои маъмулии стартап ва роҳҳои ҳалли онҳо",
-            "Бизнес: Рушди тез — growth hacking",
-            "Бизнес: Партнёрӣ ва шабакасозӣ (networking)",
-            "Бизнес: Таҳлили молиявӣ — P&L, Cash flow",
-            "Бизнес: Масъулияти иҷтимоӣ — CSR",
-            "Бизнес: Баррасии пешрафт — чи тағйир бояд дод?",
-            "Бизнес: Нақшаи рушди 6-моҳа ва 1-сола",
+            "Бизнес: Бизнес-идея — поиск и оценка проблемы",
+            "Бизнес: Анализ рынка — кто мой клиент? (ICP)",
+            "Бизнес: Анализ конкурентов — SWOT analysis",
+            "Бизнес: Бизнес-модель — Business Model Canvas",
+            "Бизнес: Как написать бизнес-план (Business Plan)",
+            "Бизнес: Расходы и доходы — стартовый бюджет",
+            "Бизнес: Маркетинг — кому, где и когда продаю?",
+            "Бизнес: SMM — Instagram, Telegram для бизнеса",
+            "Бизнес: Бренд и логотип — название и образ компании",
+            "Бизнес: Первая продажа — как найти первого клиента?",
+            "Бизнес: Психология цены — pricing strategy",
+            "Бизнес: Общение с клиентом — скрипты продаж",
+            "Бизнес: Обратная связь — как получаем отзывы?",
+            "Бизнес: Организация работы — Trello, Notion, Asana",
+            "Бизнес: MVP — что такое минимально жизнеспособный продукт?",
+            "Бизнес: Поиск инвестора — привлечение финансирования",
+            "Бизнес: Pitch deck — презентация идеи инвестору",
+            "Бизнес: Бизнес-право — регистрация компании, налоги",
+            "Бизнес: Управление персоналом — как нанимать сотрудников?",
+            "Бизнес: KPI и OKR — измерение результатов",
+            "Бизнес: E-commerce — онлайн-продажи",
+            "Бизнес: Логистика и снабжение",
+            "Бизнес: Послепродажное обслуживание (after-sales)",
+            "Бизнес: Типичные проблемы стартапа и их решения",
+            "Бизнес: Быстрый рост — growth hacking",
+            "Бизнес: Партнёрство и нетворкинг (networking)",
+            "Бизнес: Финансовый анализ — P&L, Cash flow",
+            "Бизнес: Корпоративная социальная ответственность — CSR",
+            "Бизнес: Анализ прогресса — что нужно изменить?",
+            "Бизнес: План развития на 6 месяцев и 1 год",
         ],
         "exam" =>
         [
-            "Имтиҳон: Ташкили ҷой ва нақшаи омодагӣ",
-            "Имтиҳон: Мавзӯи 1 — хонда гирифтан ва конспект",
-            "Имтиҳон: Мавзӯи 2 — мафҳумҳои асосӣ",
-            "Имтиҳон: Мавзӯи 3 — формулаҳо ва қоидаҳо",
-            "Имтиҳон: Мавзӯи 4 — таҳлил ва мисолҳо",
-            "Имтиҳон: Такрори Мавзӯи 1–4 + саволҳои тестӣ",
-            "Имтиҳон: Мавзӯи 5 — хонда гирифтан",
-            "Имтиҳон: Мавзӯи 6 — конспект ва ёддошт",
-            "Имтиҳон: Мавзӯи 7 — мисолҳо ва машқҳо",
-            "Имтиҳон: Мавзӯи 8 — вазифаҳои амалӣ",
-            "Имтиҳон: Такрори Мавзӯи 5–8 + санҷиш",
-            "Имтиҳон: Мавзӯи 9 — таҳлили чуқур",
-            "Имтиҳон: Мавзӯи 10 — хонда гирифтан",
-            "Имтиҳон: Такрори Мавзӯи 9–10 + тести пурра",
-            "Имтиҳон: Ислоҳи хатоҳо ва нуқтаҳои суст",
-            "Имтиҳон: Мавзӯи 11–12 — хонда гирифтан",
-            "Имтиҳон: Машқи тести умумӣ — 1 соат",
-            "Имтиҳон: Такрори тамоми формулаҳо ва таъриф",
-            "Имтиҳон: Санҷиши вақт — имтиҳони имитатсионӣ",
-            "Имтиҳон: Баррасии натиҷа ва ислоҳ",
-            "Имтиҳон: Мавзӯҳои душвор — такрори чуқур",
-            "Имтиҳон: Такрори тамоми конспектҳо",
-            "Имтиҳон: Санҷиши умумӣ 2 — тести пурра",
-            "Имтиҳон: Рӯзи истироҳат — мурор ва оромиш",
-            "Имтиҳон: Нуқтаҳои нодонистаро ёд гирифтан",
-            "Имтиҳон: Такрори охирини ҳамаи мавзӯҳо",
-            "Имтиҳон: Имтиҳони санҷишии ниҳоӣ",
-            "Имтиҳон: Истироҳати пурра — мағзро нигоҳ дор",
-            "Имтиҳон: Омодагии рӯзи охир — мурори кӯтоҳ",
-            "Имтиҳон: Рӯзи имтиҳон — бовар ба худ, муваффақият!",
+            "Экзамен: Организация рабочего места и план подготовки",
+            "Экзамен: Тема 1 — чтение и конспект",
+            "Экзамен: Тема 2 — основные понятия",
+            "Экзамен: Тема 3 — формулы и правила",
+            "Экзамен: Тема 4 — анализ и примеры",
+            "Экзамен: Повторение Темы 1–4 + тестовые вопросы",
+            "Экзамен: Тема 5 — чтение",
+            "Экзамен: Тема 6 — конспект и заметки",
+            "Экзамен: Тема 7 — примеры и упражнения",
+            "Экзамен: Тема 8 — практические задания",
+            "Экзамен: Повторение Темы 5–8 + проверка",
+            "Экзамен: Тема 9 — глубокий анализ",
+            "Экзамен: Тема 10 — чтение",
+            "Экзамен: Повторение Темы 9–10 + полный тест",
+            "Экзамен: Исправление ошибок и слабых мест",
+            "Экзамен: Темы 11–12 — чтение",
+            "Экзамен: Практика общего теста — 1 час",
+            "Экзамен: Повторение всех формул и определений",
+            "Экзамен: Имитационный экзамен на время",
+            "Экзамен: Разбор результата и исправление",
+            "Экзамен: Трудные темы — глубокое повторение",
+            "Экзамен: Повторение всех конспектов",
+            "Экзамен: Общая проверка 2 — полный тест",
+            "Экзамен: День отдыха — обзор и спокойствие",
+            "Экзамен: Изучение неизвестных моментов",
+            "Экзамен: Последнее повторение всех тем",
+            "Экзамен: Итоговый пробный экзамен",
+            "Экзамен: Полный отдых — сохрани свежесть ума",
+            "Экзамен: Подготовка последнего дня — краткий обзор",
+            "Экзамен: День экзамена — верь в себя, удача!",
         ],
         "react" =>
         [
-            "React: Насб — Node.js, npm, create-react-app / Vite",
-            "React: JSX — HTML дар JavaScript",
-            "React: Компонентҳои функсионалӣ",
-            "React: Props — додани маълумот байни компонентҳо",
-            "React: useState — ҳолати маҳаллӣ",
-            "React: useEffect — таъсироти паҳлӯ",
-            "React: Рӯйхатҳо ва key prop",
-            "React: Идоракунии рӯйдодҳо (onClick, onChange)",
-            "React: Шартии рендеринг (conditional rendering)",
-            "React: Формҳо ва controlled components",
-            "React: useContext — маълумоти умумӣ",
-            "React: useReducer — state-и мураккаб",
-            "React: useMemo ва useCallback — оптимизатсия",
-            "React: useRef — ишора ба DOM элемент",
-            "React: React Router — навигатсия",
-            "React: Fetch ва async/await дар React",
+            "React: Установка — Node.js, npm, create-react-app / Vite",
+            "React: JSX — HTML в JavaScript",
+            "React: Функциональные компоненты",
+            "React: Props — передача данных между компонентами",
+            "React: useState — локальное состояние",
+            "React: useEffect — побочные эффекты",
+            "React: Списки и key prop",
+            "React: Обработка событий (onClick, onChange)",
+            "React: Условный рендеринг (conditional rendering)",
+            "React: Формы и controlled components",
+            "React: useContext — общие данные",
+            "React: useReducer — сложное состояние",
+            "React: useMemo и useCallback — оптимизация",
+            "React: useRef — ссылка на DOM элемент",
+            "React: React Router — навигация",
+            "React: Fetch и async/await в React",
             "React: TanStack Query — server state",
-            "React: Zustand — state management",
-            "React: Tailwind CSS бо React",
-            "React: TypeScript бо React",
-            "React: Тестҳо — React Testing Library",
-            "React: Next.js — асосҳо",
+            "React: Zustand — управление состоянием",
+            "React: Tailwind CSS с React",
+            "React: TypeScript с React",
+            "React: Тесты — React Testing Library",
+            "React: Next.js — основы",
             "React: Next.js — App Router",
             "React: Next.js — Server Components",
             "React: Next.js — API Routes",
@@ -755,9 +807,9 @@ public sealed class GeminiService(
             "React: Error Boundaries",
             "React: Performance — Profiler",
             "React: Accessibility (a11y)",
-            "React: Лоиҳаи ниҳоӣ — Full-stack Next.js App",
+            "React: Итоговый проект — Full-stack Next.js App",
         ],
-        _ => Enumerable.Range(1, 90).Select(d => $"{label}: Дарси {d}").ToList()
+        _ => Enumerable.Range(1, 90).Select(d => $"{label}: Урок {d}").ToList()
     };
 
     /// <summary>
@@ -786,39 +838,39 @@ public sealed class GeminiService(
         return
         [
             new GeminiSuggestedTask(
-                "Медитатсия ва нафаскашии чуқур",
-                "10 дақиқа медитатсия барои оромиши зеҳн ва коҳиши стресс.",
+                "Медитация и глубокое дыхание",
+                "10 минут медитации для успокоения ума и снижения стресса.",
                 ToUtcFromLocal(date, 7, 30, userTimeZone),
                 10,
-                "Тадқиқотҳо нишон медиҳанд ки медитатсияи рӯзона маҳсулнокиро 23% зиёд мекунад."),
+                "Исследования показывают, что ежедневная медитация повышает продуктивность на 23%."),
 
             new GeminiSuggestedTask(
-                "Хондани китоб ё мақолаи касбӣ",
-                "30 дақиқа хондан барои рушди касбӣ ва афзоиши дониш.",
+                "Чтение книги или профессиональной статьи",
+                "30 минут чтения для профессионального развития и получения знаний.",
                 ToUtcFromLocal(date, 21, 0, userTimeZone),
                 30,
-                "Роҳбарони муваффақ рӯзона ҳадди ақал 30 дақиқа мехонанд."),
+                "Успешные руководители читают минимум 30 минут в день."),
 
             new GeminiSuggestedTask(
-                "Нӯшидани об ва ҳаракати кӯтоҳ",
-                "Ҳар 2 соат 5 дақиқа ҳаракат кун ва як стакан об нӯш.",
+                "Питьё воды и короткая разминка",
+                "Каждые 2 часа делай 5-минутную разминку и выпивай стакан воды.",
                 ToUtcFromLocal(date, 11, 0, userTimeZone),
                 5,
-                "Нӯшидани 8 стакан об дар рӯз энергия ва тамаркузро беҳтар мекунад."),
+                "Употребление 8 стаканов воды в день улучшает энергию и концентрацию."),
 
             new GeminiSuggestedTask(
-                "Банақшагирии рӯзи оянда",
-                "10 дақиқа барои навиштани корҳои муҳими фардо ва таъини авлавиятҳо.",
+                "Планирование следующего дня",
+                "10 минут на запись важных дел на завтра и расстановку приоритетов.",
                 ToUtcFromLocal(date, 21, 30, userTimeZone),
                 10,
-                "Банақшагирии шабона вақти саҳариро то 1 соат кам мекунад."),
+                "Вечернее планирование сокращает утреннее время на 1 час."),
 
             new GeminiSuggestedTask(
-                "Вақти сифатнок бо оила",
-                "30 дақиқа бидуни телефон бо оила суҳбат кун ё бозӣ кун.",
+                "Качественное время с семьёй",
+                "30 минут без телефона — поговори или поиграй с семьёй.",
                 ToUtcFromLocal(date, 19, 30, userTimeZone),
                 30,
-                "Муносибатҳои қавии оилавӣ асоси хушбахтӣ ва мотиватсияи рӯзмарра мебошанд.")
+                "Крепкие семейные отношения — основа счастья и ежедневной мотивации.")
         ];
     }
 
@@ -826,8 +878,8 @@ public sealed class GeminiService(
     {
         var tasks = new List<GeminiScheduledTask>();
 
-        // Matches: "соати 8:00", "соати 10-10:30", "соати 10:30-12:00", "Саҳар соати 8"
-        var pattern = @"[Сс]оати\s+(\d{1,2}(?::\d{2})?)(?:\s*[-–]\s*(\d{1,2}(?::\d{2})?))?(.+?)(?=\.\s*[А-ЯҲҶӢОУа-яҳҷӣоу]|[Сс]оати|\z)";
+        // Matches: "в 8:00", "в 10:00-10:30", "в 10:30-12:00", "Утром в 8"
+        var pattern = @"[Вв]\s+(\d{1,2}(?::\d{2})?)(?:\s*[-–]\s*(\d{1,2}(?::\d{2})?))?(.+?)(?=\.\s*[А-Яа-я]|[Вв]\s+\d|\z)";
         var matches = Regex.Matches(text, pattern, RegexOptions.Singleline);
 
         foreach (Match match in matches)
@@ -863,7 +915,7 @@ public sealed class GeminiService(
         // If regex found nothing, create one generic task
         if (tasks.Count == 0)
             tasks.Add(new GeminiScheduledTask(
-                "Корҳои рӯзона",
+                "Ежедневные дела",
                 text.Length > 200 ? text[..200].Trim() + "..." : text,
                 ToUtcFromLocal(date, 9, 0, userTimeZone),
                 60,

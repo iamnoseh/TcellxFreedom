@@ -14,9 +14,9 @@ public sealed class GetPlanByIdQueryHandler(IPlanRepository planRepository)
     {
         var plan = await planRepository.GetByIdWithTasksAsync(request.PlanId, cancellationToken);
         if (plan is null)
-            return new Response<PlanDetailDto>(HttpStatusCode.NotFound, "Накша ёфт нашуд.");
+            return new Response<PlanDetailDto>(HttpStatusCode.NotFound, "План не найден.");
         if (plan.UserId != request.UserId)
-            return new Response<PlanDetailDto>(HttpStatusCode.Forbidden, "Дастрасӣ манъ аст.");
+            return new Response<PlanDetailDto>(HttpStatusCode.Forbidden, "Доступ запрещён.");
 
         return new Response<PlanDetailDto>(plan.ToDetailDto());
     }

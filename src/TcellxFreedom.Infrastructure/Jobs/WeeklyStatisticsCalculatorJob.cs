@@ -69,7 +69,7 @@ public sealed class WeeklyStatisticsCalculatorJob(
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "Хатогӣ ҳангоми тавлиди тавсияҳои ИИ барои корбар {UserId}", userId);
+            logger.LogError(ex, "Ошибка при генерации предложений ИИ для пользователя {UserId}", userId);
         }
     }
 

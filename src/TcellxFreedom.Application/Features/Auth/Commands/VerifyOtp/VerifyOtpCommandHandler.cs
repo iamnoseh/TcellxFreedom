@@ -16,7 +16,7 @@ public sealed class VerifyOtpCommandHandler(
     {
         var isValid = await otpVerifier.VerifyOtpAsync(request.PhoneNumber, request.OtpCode, cancellationToken);
         if (!isValid)
-            throw new UnauthorizedAccessException("Рамзи OTP нодуруст аст.");
+            throw new UnauthorizedAccessException("Неверный OTP код.");
 
         var user = await userRepository.GetByPhoneNumberAsync(request.PhoneNumber, cancellationToken)
                    ?? await CreateNewUserAsync(request.PhoneNumber, userRepository, cancellationToken);

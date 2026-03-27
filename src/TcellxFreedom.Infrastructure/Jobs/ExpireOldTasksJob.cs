@@ -18,6 +18,6 @@ public sealed class ExpireOldTasksJob(
         if (pendingTasks.Count > 0)
             await dailyTaskRepository.UpdateRangeAsync(pendingTasks);
 
-        logger.LogInformation("ExpireOldTasksJob: {Count} вазифаи санаи {Date} мӯҳлаташон гузашт.", pendingTasks.Count, yesterday);
+        logger.LogInformation("ExpireOldTasksJob: {Count} задач за {Date} истекли.", pendingTasks.Count, yesterday);
     }
 }

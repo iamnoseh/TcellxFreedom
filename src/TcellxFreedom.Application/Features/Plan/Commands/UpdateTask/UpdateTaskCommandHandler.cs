@@ -17,14 +17,14 @@ public sealed class UpdateTaskCommandHandler(
     {
         var task = await taskRepository.GetByIdAsync(request.TaskId, cancellationToken);
         if (task is null)
-            return new Response<PlanTaskDto>(HttpStatusCode.NotFound, "Вазифа ёфт нашуд.");
+            return new Response<PlanTaskDto>(HttpStatusCode.NotFound, "Задача не найдена.");
 
         var plan = await planRepository.GetByIdAsync(task.PlanId, cancellationToken);
         if (plan is null || plan.UserId != request.UserId)
-            return new Response<PlanTaskDto>(HttpStatusCode.Forbidden, "Дастрасӣ манъ аст.");
+            return new Response<PlanTaskDto>(HttpStatusCode.Forbidden, "Доступ запрещён.");
 
         if (plan.Status != PlanStatus.Draft)
-            return new Response<PlanTaskDto>(HttpStatusCode.BadRequest, "Танҳо вазифаҳои накшаи пешнавис тағир дода мешаванд.");
+            return new Response<PlanTaskDto>(HttpStatusCode.BadRequest, "Изменять можно только задачи планов в статусе черновика.");
 
         task.UpdateDetails(request.Title, request.Description, request.ScheduledAt, request.EstimatedMinutes);
         await taskRepository.UpdateAsync(task, cancellationToken);

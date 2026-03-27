@@ -6,6 +6,6 @@ public sealed class ClaimRewardCommandValidator : AbstractValidator<ClaimRewardC
 {
     public ClaimRewardCommandValidator()
     {
-        RuleFor(x => x.Level).InclusiveBetween(1, 20).WithMessage("Дараҷа бояд байни 1 ва 20 бошад.");
+        RuleFor(x => x.Level).InclusiveBetween(1, 20).WithMessage("Уровень должен быть от 1 до 20.");
     }
 }

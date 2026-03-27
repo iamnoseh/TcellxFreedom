@@ -34,7 +34,7 @@ public sealed class OsonSmsService : IOsonSmsService
             var request = CreateSendSmsRequest(phoneNumber, message, hash, txnId);
             var response = await _restClient.ExecuteAsync<OsonSmsSendResponseDto>(request);
 
-            return HandleResponse(response, "SMS муваффақият равон шуд", "Хатогӣ дар равонкунии SMS");
+            return HandleResponse(response, "SMS успешно отправлено", "Ошибка при отправке SMS");
         }
         catch (Exception ex)
         {
@@ -52,7 +52,7 @@ public sealed class OsonSmsService : IOsonSmsService
             var request = CreateCheckStatusRequest(msgId, hash, txnId);
             var response = await _restClient.ExecuteAsync<OsonSmsStatusResponseDto>(request);
 
-            return HandleResponse(response, "Статус гирифта шуд", "Хатогӣ дар гирифтани статус");
+            return HandleResponse(response, "Статус получен", "Ошибка при получении статуса");
         }
         catch (Exception ex)
         {
@@ -70,7 +70,7 @@ public sealed class OsonSmsService : IOsonSmsService
             var request = CreateCheckBalanceRequest(hash, txnId);
             var response = await _restClient.ExecuteAsync<OsonSmsBalanceResponseDto>(request);
 
-            return HandleResponse(response, "Баланс гирифта шуд", "Хатогӣ дар гирифтани баланс");
+            return HandleResponse(response, "Баланс получен", "Ошибка при получении баланса");
         }
         catch (Exception ex)
         {
@@ -119,7 +119,7 @@ public sealed class OsonSmsService : IOsonSmsService
             var error = GetErrorFromData(response.Data);
             if (error != null)
             {
-                _logger.LogWarning("OsonSMS API хатогӣ баргардонд: {Error}", error.Message);
+                _logger.LogWarning("OsonSMS API вернул ошибку: {Error}", error.Message);
                 return new Response<T>(HttpStatusCode.BadRequest, error.Message);
             }
 
@@ -127,7 +127,7 @@ public sealed class OsonSmsService : IOsonSmsService
         }
 
         _logger.LogError(
-            "OsonSMS HTTP хатогӣ: StatusCode={StatusCode}, ErrorMessage={ErrorMessage}, Content={Content}",
+            "OsonSMS HTTP ошибка: StatusCode={StatusCode}, ErrorMessage={ErrorMessage}, Content={Content}",
             (int)response.StatusCode, response.ErrorMessage, response.Content);
 
         return new Response<T>(response.StatusCode, response.ErrorMessage ?? errorMessage);
@@ -160,6 +160,6 @@ public sealed class OsonSmsService : IOsonSmsService
 
     private static Response<T> CreateErrorResponse<T>(string errorMessage) where T : class
     {
-        return new Response<T>(HttpStatusCode.InternalServerError, $"Хатогӣ: {errorMessage}");
+        return new Response<T>(HttpStatusCode.InternalServerError, $"Ошибка: {errorMessage}");
     }
 }

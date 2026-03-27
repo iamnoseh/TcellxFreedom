@@ -17,9 +17,9 @@ public sealed class ReviewAiSuggestionsCommandHandler(
     {
         var plan = await planRepository.GetByIdWithTasksAsync(request.PlanId, cancellationToken);
         if (plan is null)
-            return new Response<PlanDetailDto>(HttpStatusCode.NotFound, "Накша ёфт нашуд.");
+            return new Response<PlanDetailDto>(HttpStatusCode.NotFound, "План не найден.");
         if (plan.UserId != request.UserId)
-            return new Response<PlanDetailDto>(HttpStatusCode.Forbidden, "Дастрасӣ манъ аст.");
+            return new Response<PlanDetailDto>(HttpStatusCode.Forbidden, "Доступ запрещён.");
 
         var decisionMap = request.Decisions.ToDictionary(d => d.TaskId, d => d.Accept);
 
@@ -28,7 +28,7 @@ public sealed class ReviewAiSuggestionsCommandHandler(
             if (decisionMap.TryGetValue(task.Id, out var accept) && accept)
                 task.Accept();
             else
-                task.Reject(); // дар decisions нагузошта ё рад — автоматик reject
+                task.Reject(); // не указано в decisions или отклонено — автоматически reject
         }
 
         plan.Activate();

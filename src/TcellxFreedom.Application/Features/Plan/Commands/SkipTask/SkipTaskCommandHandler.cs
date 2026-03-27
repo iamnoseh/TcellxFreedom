@@ -18,11 +18,11 @@ public sealed class SkipTaskCommandHandler(
     {
         var task = await taskRepository.GetByIdAsync(request.TaskId, cancellationToken);
         if (task is null)
-            return new Response<PlanTaskDto>(HttpStatusCode.NotFound, "Вазифа ёфт нашуд.");
+            return new Response<PlanTaskDto>(HttpStatusCode.NotFound, "Задача не найдена.");
 
         var plan = await planRepository.GetByIdAsync(task.PlanId, cancellationToken);
         if (plan is null || plan.UserId != request.UserId)
-            return new Response<PlanTaskDto>(HttpStatusCode.Forbidden, "Дастрасӣ манъ аст.");
+            return new Response<PlanTaskDto>(HttpStatusCode.Forbidden, "Доступ запрещён.");
 
         task.Reject();
         await taskRepository.UpdateAsync(task, cancellationToken);

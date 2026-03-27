@@ -14,9 +14,9 @@ public sealed class GetAiSuggestionsQueryHandler(IPlanRepository planRepository)
     {
         var plan = await planRepository.GetByIdWithTasksAsync(request.PlanId, cancellationToken);
         if (plan is null)
-            return new Response<List<PlanTaskDto>>(HttpStatusCode.NotFound, "Нақша ёфт нашуд.");
+            return new Response<List<PlanTaskDto>>(HttpStatusCode.NotFound, "План не найден.");
         if (plan.UserId != request.UserId)
-            return new Response<List<PlanTaskDto>>(HttpStatusCode.Forbidden, "Дастрасӣ манъ аст.");
+            return new Response<List<PlanTaskDto>>(HttpStatusCode.Forbidden, "Доступ запрещён.");
 
         var suggestions = plan.Tasks
             .Where(t => t.IsAiSuggested)

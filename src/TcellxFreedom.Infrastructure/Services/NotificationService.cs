@@ -24,8 +24,8 @@ public sealed class NotificationService(
             task.Id,
             userId,
             notifyAt,
-            $"Ёдоварӣ: {task.Title}",
-            $"Вазифаи «{task.Title}» баъди {offsetMinutes} дақиқа оғоз мешавад.");
+            $"Напоминание: {task.Title}",
+            $"Задача «{task.Title}» начнётся через {offsetMinutes} минут.");
 
         await notificationRepository.CreateAsync(notification, ct);
 

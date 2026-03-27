@@ -24,11 +24,11 @@ public sealed class DailyTaskAssignmentJob(
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Хатогӣ ҳангоми таъин кардани вазифаҳои рӯзона барои корбар {UserId}", pass.UserId);
+                logger.LogError(ex, "Ошибка при назначении ежедневных задач для пользователя {UserId}", pass.UserId);
             }
         }
 
-        logger.LogInformation("DailyTaskAssignmentJob: вазифаҳои {Date} таъин карда шуданд. Корбарон: {Count}.", today, passes.Count);
+        logger.LogInformation("DailyTaskAssignmentJob: задачи за {Date} назначены. Пользователей: {Count}.", today, passes.Count);
     }
 
     private async Task AssignTasksForUserAsync(UserTcellPass pass, DateOnly today)

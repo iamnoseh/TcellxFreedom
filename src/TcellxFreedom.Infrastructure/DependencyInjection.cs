@@ -1,10 +1,13 @@
+using System.Net;
 using Hangfire;
 using Hangfire.PostgreSql;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Http.Resilience;
 using Microsoft.Extensions.Options;
+using Polly;
 using TcellxFreedom.Application.Interfaces;
 using TcellxFreedom.Domain.Interfaces;
 using TcellxFreedom.Infrastructure.Configuration;
@@ -80,11 +83,26 @@ public static class DependencyInjection
 
         // Gemini AI
         services.Configure<GeminiSettings>(configuration.GetSection(GeminiSettings.SectionName));
-               services.AddHttpClient("Gemini", (sp, client) =>
+        services.AddHttpClient("Gemini", (sp, client) =>
         {
             var settings = sp.GetRequiredService<IOptions<GeminiSettings>>().Value;
             client.BaseAddress = new Uri(settings.BaseUrl);
             client.Timeout = TimeSpan.FromSeconds(300);
+        })
+        .AddResilienceHandler("gemini-resilience", builder =>
+        {
+            // Retry for transient network errors and 5xx only.
+            // 429 is handled manually in GeminiService to respect the retry delay from the response body.
+            builder.AddRetry(new HttpRetryStrategyOptions
+            {
+                MaxRetryAttempts = 3,
+                Delay = TimeSpan.FromSeconds(5),
+                BackoffType = DelayBackoffType.Exponential,
+                UseJitter = true,
+                ShouldHandle = new PredicateBuilder<HttpResponseMessage>()
+                    .HandleResult(r => (int)r.StatusCode >= 500)
+                    .Handle<HttpRequestException>()
+            });
         });
         services.AddScoped<IGeminiService, GeminiService>();
 
